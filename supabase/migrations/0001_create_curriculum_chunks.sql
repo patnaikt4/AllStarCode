@@ -1,0 +1,11 @@
+-- TODO: Enable pgvector extension
+-- e.g. CREATE EXTENSION IF NOT EXISTS vector;
+
+-- TODO: Create curriculum_chunks table
+-- Fields:
+--   id (uuid primary key)
+--   source_doc (text)
+--   chunk_text (text)
+--   embedding (vector)
+--   metadata (jsonb)
+--   created_at (timestamp)
