@@ -1,28 +1,63 @@
-/**
- * Login page (Email + Password).
- * TODO: Wire form to Supabase Auth signInWithPassword.
- * TODO: On success, redirect to /dashboard.
- * TODO: Show error message on failure.
- */
+'use client'
+
+import { useState } from 'react'
+import { useRouter } from 'next/navigation'
+import { createClient } from '@/lib/supabase/client'
+
 export default function LoginPage() {
+  const [email, setEmail] = useState('')
+  const [password, setPassword] = useState('')
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  const router = useRouter()
+  const supabase = createClient()
+
+  async function handleLogin(e: React.FormEvent) {
+    e.preventDefault()
+    setError('')
+    setLoading(true)
+
+    const { error } = await supabase.auth.signInWithPassword({ email, password })
+
+    if (error) {
+      setError(error.message)
+      setLoading(false)
+    } else {
+      router.push('/dashboard')
+    }
+  }
+
   return (
-    <main style={{ padding: "2rem", fontFamily: "sans-serif", maxWidth: "24rem" }}>
-      <h1>Log in</h1>
-      <form>
-        {/* TODO: Controlled inputs for email and password */}
-        <div style={{ marginBottom: "1rem" }}>
-          <label htmlFor="email">Email</label>
-          <input id="email" name="email" type="email" placeholder="you@example.com" style={{ display: "block", width: "100%", padding: "0.5rem" }} readOnly aria-label="Email" />
-        </div>
-        <div style={{ marginBottom: "1rem" }}>
-          <label htmlFor="password">Password</label>
-          <input id="password" name="password" type="password" placeholder="••••••••" style={{ display: "block", width: "100%", padding: "0.5rem" }} readOnly aria-label="Password" />
-        </div>
-        <button type="submit" disabled>Sign in</button>
+    <main>
+      <h1>Log In</h1>
+
+      <form onSubmit={handleLogin}>
+        <input
+          type="email"
+          placeholder="Email address"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          required
+        />
+        <input
+          type="password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          required
+        />
+
+        {error && <p className="error">{error}</p>}
+
+        <button type="submit" disabled={loading}>
+          {loading ? 'Logging in…' : 'Log In'}
+        </button>
       </form>
-      <p style={{ marginTop: "1rem" }}>
-        <a href="/signup">Create an account</a>
-      </p>
+
+      <div className="link-row">
+        Don&apos;t have an account? <a href="/signup">Sign up</a>
+      </div>
     </main>
-  );
+  )
 }

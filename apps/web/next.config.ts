@@ -1,7 +1,5 @@
-import type { NextConfig } from "next";
+import type { NextConfig } from 'next'
 
-const nextConfig: NextConfig = {
-  // TODO: Add env validation or rewrites if needed
-};
+const nextConfig: NextConfig = {}
 
-export default nextConfig;
+export default nextConfig

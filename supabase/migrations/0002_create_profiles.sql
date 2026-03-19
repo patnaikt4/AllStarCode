@@ -1,13 +1,26 @@
--- Profiles table: links auth.users to app role (instructor | admin).
--- Run after Supabase Auth is enabled (Email + Password).
+-- Create profiles table
+-- Stores the role for each user (admin or instructor)
+-- The id column links directly to the Supabase auth.users table
 
--- TODO: Create profiles table
--- Fields:
---   id (uuid primary key, references auth.users(id) on delete cascade)
---   role (text not null, check: role in ('instructor', 'admin'))
---   email (text, optional)
---   created_at (timestamptz default now())
---   updated_at (timestamptz default now())
+CREATE TABLE profiles (
+  id   uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+  role text NOT NULL CHECK (role IN ('admin', 'instructor'))
+);
 
--- TODO: Enable RLS; policy so users can read their own row
--- TODO: Trigger to insert a profile row on auth.users signup (optional)
+-- Turn on Row Level Security so users can only touch their own row
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+-- Let a logged-in user read their own profile
+CREATE POLICY "Users can read own profile"
+  ON profiles FOR SELECT
+  USING (auth.uid() = id);
+
+-- Let a logged-in user create their own profile (runs once at signup)
+CREATE POLICY "Users can insert own profile"
+  ON profiles FOR INSERT
+  WITH CHECK (auth.uid() = id);
+
+-- Let a logged-in user update their own profile
+CREATE POLICY "Users can update own profile"
+  ON profiles FOR UPDATE
+  USING (auth.uid() = id);
