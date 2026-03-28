@@ -11,8 +11,6 @@ export async function GET(
   _request: Request,
   context: RouteContext
 ) {
-  const { instructorId } = await context.params;
-
   const auth = await requireAdmin();
 
   if (!auth.ok) {
@@ -22,6 +20,7 @@ export async function GET(
     );
   }
 
+  const { instructorId } = await context.params;
   const { supabase } = auth;
 
   const { data: instructor, error: instructorError } = await supabase
@@ -45,25 +44,26 @@ export async function GET(
     );
   }
 
-  const { data: feedbackRows, error: feedbackError } = await supabase
-    .from("feedback")
-    .select("feedback_id, feedback, created_at")
-    .eq("instructor_id", instructorId)
+  const { data: fileRows, error: filesError } = await supabase
+    .from("files")
+    .select("file_id, original_name, storage_path, created_at")
+    .eq("user_id", instructorId)
     .order("created_at", { ascending: false });
 
-  if (feedbackError) {
+  if (filesError) {
     return NextResponse.json(
-      { error: "Failed to fetch feedback" },
+      { error: "Failed to fetch files" },
       { status: 500 }
     );
   }
 
-  const feedback =
-    feedbackRows?.map((row) => ({
-      id: row.feedback_id,
-      feedback: row.feedback,
+  const files =
+    fileRows?.map((row) => ({
+      id: row.file_id,
+      name: row.original_name,
+      url: row.storage_path,
       created_at: row.created_at,
     })) ?? [];
 
-  return NextResponse.json(feedback);
+  return NextResponse.json(files);
 }
