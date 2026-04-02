@@ -5,7 +5,10 @@ Uses OpenAI embeddings and pgvector cosine similarity to retrieve the most
 relevant curriculum context for a given instructor transcript query.
 """
 
+import argparse
+import json
 import os
+import sys
 from typing import Dict, List
 
 from dotenv import load_dotenv
@@ -73,3 +76,32 @@ def get_similar_chunks(query: str, k: int = 3) -> List[Dict]:
     ).execute()
 
     return response.data
+
+
+def main() -> int:
+    """
+    Small CLI wrapper so server-side TypeScript can retrieve curriculum chunks.
+    """
+    parser = argparse.ArgumentParser(description="Retrieve curriculum chunks for a query.")
+    parser.add_argument("--query", help="Query text. If omitted, the script reads from stdin.")
+    parser.add_argument("--k", type=int, default=3, help="Number of chunks to retrieve.")
+    args = parser.parse_args()
+
+    query = args.query if args.query is not None else sys.stdin.read()
+
+    if not query or not query.strip():
+        parser.error("A non-empty query is required via --query or stdin.")
+
+    try:
+        results = get_similar_chunks(query, args.k)
+    except Exception as exc:
+        print(f"Similarity search failed: {exc}", file=sys.stderr)
+        return 1
+
+    json.dump(results, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
