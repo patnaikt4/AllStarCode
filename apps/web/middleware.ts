@@ -47,5 +47,10 @@ export async function middleware(request: NextRequest) {
 
 // Only run this middleware on protected routes
 export const config = {
-  matcher: ['/dashboard/:path*', '/admin/:path*', '/instructor/:path*'],
+  matcher: [
+    '/dashboard/:path*',
+    '/admin/:path*',
+    '/instructor',
+    '/instructor/:path*',
+  ],
 }

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import PDFDocument from 'pdfkit'
 
+import { getFeedbackStorageBucket } from '@/lib/feedback/feedback-storage-bucket'
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
@@ -10,7 +11,6 @@ import { createClient } from '@/lib/supabase/server'
 export const runtime = 'nodejs'
 
 const LESSON_PLAN_BUCKET = 'lesson-plans'
-const FEEDBACK_BUCKET = 'feedback'
 
 type GenerateFeedbackRequest = {
   instructorId?: unknown
@@ -149,22 +149,31 @@ async function storeFeedbackPdf(params: {
   const storagePath = `${instructorId}/${lessonPlanId}/${feedbackId}.pdf`
 
   const { error: uploadError } = await supabase.storage
-    .from(FEEDBACK_BUCKET)
+    .from(getFeedbackStorageBucket())
     .upload(storagePath, pdfBuffer, {
       contentType: 'application/pdf',
       upsert: true,
     })
 
   if (uploadError) {
-    throw new Error(`Failed to upload feedback PDF: ${uploadError.message}`)
+    const hint = /bucket not found/i.test(uploadError.message)
+      ? ` In Supabase, create a private Storage bucket with id "${getFeedbackStorageBucket()}" (or set FEEDBACK_STORAGE_BUCKET to your bucket name).`
+      : ''
+    throw new Error(
+      `Failed to upload feedback PDF: ${uploadError.message}.${hint}`
+    )
   }
+
+  const originalFilename = `${lessonPlanId.replace(/[/\\?%*:|"<>]/g, '-')}-feedback.pdf`
 
   const { error: insertError } = await supabase.from('feedback').insert({
     id: feedbackId,
-    instructor_id: instructorId,
+    user_id: instructorId,
     lesson_plan_id: lessonPlanId,
     storage_path: storagePath,
     feedback_text: feedback,
+    original_filename: originalFilename,
+    status: 'ready',
   })
 
   if (insertError) {

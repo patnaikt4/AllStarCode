@@ -1,118 +1,103 @@
-# Curriculum Embeddings
+# Curriculum embeddings
 
-## Overview
-
-Curriculum content is chunked, embedded with OpenAI's `text-embedding-3-small` model, and stored in Supabase (`curriculum_chunks` table with pgvector). This enables cosine similarity search so the LLM feedback engine can pull the most relevant All Star Code curriculum context for each instructor transcript.
+Vector embeddings for All Star Code curriculum text so LLM feedback can cite relevant material via retrieval-augmented generation (RAG).
 
 ---
 
-## How It Works
+## Current schema
 
-### 1. Embedding Generation (`scripts/generate_embeddings.py`)
+Defined in `supabase/migrations/0001_create_curriculum_chunks.sql`.
 
-- `embed_text(text)` calls the OpenAI Embeddings API and returns a 1536-dimensional float vector.
-- `upsert_curriculum_chunk(source_doc, chunk_text, embedding, metadata)` writes the chunk and its vector into the `curriculum_chunks` table in Supabase.
+| Column | Type | Purpose |
+|--------|------|--------|
+| `id` | `uuid` | Primary key (default `gen_random_uuid()`). |
+| `source_doc` | `text` | Human-readable source name (file, unit, etc.). |
+| `chunk_text` | `text` | Text segment that was embedded. |
+| `embedding` | `vector(1536)` | Embedding from OpenAI `text-embedding-3-small`. |
+| `metadata` | `jsonb` | Extra fields (e.g. `chunk_index`, `chunk_count`). |
+| `created_at` | `timestamptz` | Insert time. |
 
-### 2. Database Schema (`supabase/migrations/0001_create_curriculum_chunks.sql`)
+**Extensions / indexes**
 
-| Column | Type | Description |
-|---|---|---|
-| `id` | `uuid` | Primary key, auto-generated. |
-| `source_doc` | `text` | Name of the source curriculum document. |
-| `chunk_text` | `text` | Raw text of the chunk. |
-| `embedding` | `vector(1536)` | OpenAI embedding vector (text-embedding-3-small). |
-| `metadata` | `jsonb` | Arbitrary extra fields (e.g. lesson number, topic). |
-| `created_at` | `timestamptz` | Insertion timestamp. |
+- `CREATE EXTENSION vector` enables pgvector.
+- IVFFlat index on `embedding` with `vector_cosine_ops` for approximate nearest-neighbor search.
 
-An **IVFFlat index** (`vector_cosine_ops`) is created on `embedding` to keep queries fast as the table grows. **Run the index DDL after loading data** — IVFFlat requires rows to exist to train its cluster centroids.
+**RPC**
 
-A **stored function** `match_curriculum_chunks(query_embedding, match_count)` encapsulates the pgvector query and is called from Python via Supabase's `.rpc()` helper.
+- `match_curriculum_chunks(query_embedding vector(1536), match_count int)` returns the top `match_count` rows by cosine distance, with `similarity = 1 - (embedding <=> query_embedding)`.
 
-### 3. Similarity Search (`scripts/similarity_search.py`)
-
-**`get_query_embedding(query: str) -> List[float]`**
-- Calls OpenAI Embeddings API with the same model/dimensions as stored vectors.
-- Returns the 1536-dim embedding for the query string.
-
-**`get_similar_chunks(query: str, k: int = 3) -> List[Dict]`**
-- Calls `get_query_embedding` to embed the query.
-- Invokes the `match_curriculum_chunks` Supabase RPC with the query vector and `k`.
-- Returns a ranked list of dicts, each with `chunk_text`, `metadata`, and `similarity` (0–1 cosine similarity score).
-
-The underlying SQL uses pgvector's **cosine distance operator** (`<=>`):
-
-```sql
-SELECT
-  id, source_doc, chunk_text, metadata,
-  1 - (embedding <=> query_embedding) AS similarity
-FROM curriculum_chunks
-ORDER BY embedding <=> query_embedding
-LIMIT match_count;
-```
-
-`1 - cosine_distance` converts pgvector's distance (lower = closer) into a similarity score (higher = more relevant).
+Apply migrations with the Supabase CLI or paste SQL into the SQL editor so the table and function exist before ingesting data.
 
 ---
 
-## Configuration
+## How embeddings are generated
 
-The similarity search script reads environment variables from `apps/web/.env.local` (the same file used by the Next.js app, per README). Add your OpenAI key alongside the existing Supabase keys:
+1. **Model:** OpenAI `text-embedding-3-small`, **1536 dimensions** (must match the `vector(1536)` column).
+2. **Script:** `scripts/generate_embeddings.py`
+   - `embed_text(text: str) -> list[float]` calls the Embeddings API with the same model and `dimensions=1536` as `scripts/similarity_search.py` (query embeddings must match stored vectors).
+3. **Chunking:** Ingestion splits input on blank lines and packs paragraphs up to `--max-chars` (default 2000), hard-splitting very long paragraphs so each stored chunk fits the model context.
 
-```
-NEXT_PUBLIC_SUPABASE_URL=your_project_url
-NEXT_PUBLIC_SUPABASE_ANON_KEY=your_anon_key
-OPENAI_API_KEY=your_openai_key
-```
+**Environment** (read from `apps/web/.env.local`):
 
-| Variable | Description |
-|---|---|
-| `OPENAI_API_KEY` | OpenAI API key for embedding calls. |
-| `NEXT_PUBLIC_SUPABASE_URL` | Supabase project URL. |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase anon/public key. |
+- `OPENAI_API_KEY` — required for embedding calls.
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY` — required for inserts.
+- `SUPABASE_SERVICE_ROLE_KEY` (optional) — use for ingestion if Row Level Security or policies block anon inserts; **do not** expose this key in client-side code.
 
 ---
 
-## Running the Test Script
+## How to insert new curriculum later
 
-Install dependencies (from project root):
+1. Install Python deps: `pip install -r backend/requirements.txt` (from repo root).
+2. Ingest a file:
+
+   ```bash
+   python scripts/generate_embeddings.py path/to/curriculum.md --source-doc "Unit 2 — Loops"
+   ```
+
+3. **Re-import the same source** (replace old chunks for that name):
+
+   ```bash
+   python scripts/generate_embeddings.py path/to/curriculum.md --source-doc "Unit 2 — Loops" --replace
+   ```
+
+4. **Stdin** (no file argument):
+
+   ```bash
+   type some.txt | python scripts/generate_embeddings.py --source-doc "Scratch notes"
+   ```
+
+Each chunk is inserted as its own row (new `id`). The CLI stores `metadata.chunk_index` / `chunk_count` for ordering within a source.
+
+**IVFFlat:** If the index was created on an empty table, consider dropping and recreating it after a large bulk load, or use `REINDEX`, so centroids reflect real data (see [Supabase AI / pgvector docs](https://supabase.com/docs/guides/ai)).
+
+---
+
+## How retrieval works
+
+1. **Query embedding:** `scripts/similarity_search.py` embeds the query text (e.g. lesson plan excerpt) with the same model and dimensions.
+2. **Search:** It calls Supabase `.rpc("match_curriculum_chunks", { "query_embedding": ..., "match_count": k })`.
+3. **Ranking:** PostgreSQL orders by cosine distance `<=>`; smaller distance means closer vectors. The RPC exposes similarity as `1 - distance`.
+
+Smoke test:
 
 ```bash
-pip install -r backend/requirements.txt
-```
-
-Then run:
-
-```bash
-# From project root
 python scripts/test_similarity.py
 ```
 
-The script runs the query `"How do I teach debugging?"` and prints the raw list of top-3 matching chunk dicts. Expected output shape:
+---
 
-```
-[
-  {'id': 'abc...', 'source_doc': 'curriculum.pdf', 'chunk_text': '...', 'metadata': {}, 'similarity': 0.87},
-  ...
-]
-```
+## How this plugs into the LLM prompt
+
+1. **API route** `apps/web/app/api/feedback/generate/route.ts` calls `getFeedbackFromRag()` in `apps/web/lib/feedback/get-feedback-from-rag.ts`.
+2. **RAG step:** `retrieveCurriculumContext()` runs `similarity_search.py` with the **extracted lesson plan text** on stdin and reads JSON chunks from stdout. If the script is missing or fails, it falls back to a placeholder string.
+3. **Prompting:** `buildFeedbackPrompt()` injects the formatted **curriculum context** plus the **lesson plan text** into the user message; `FEEDBACK_SYSTEM_PROMPT` sets the coach role. The model is configured via `OPENAI_FEEDBACK_MODEL` (default `gpt-5-mini`).
+
+So: **lesson plan text → embed + match chunks → stringify context → LLM** alongside the system instructions.
 
 ---
 
-## Design Decisions
+## References
 
-**Why `text-embedding-3-small`?**
-- 1536 dimensions — strong semantic quality at low cost (~$0.02 / 1M tokens).
-- Same model is used for both storage and query, guaranteeing dimension parity.
-
-**Why IVFFlat over HNSW?**
-- IVFFlat has lower memory overhead and is simpler to tune for a small-to-medium corpus. HNSW can be swapped in later if recall or query speed becomes a concern.
-
-**Why a stored RPC function (`match_curriculum_chunks`)?**
-- Supabase's Python SDK doesn't support raw SQL through the standard client. Wrapping the pgvector query in a PostgreSQL function lets Python call it cleanly via `.rpc()` without needing a direct database connection.
-
----
-
-## Future Integration
-
-- `get_similar_chunks(transcript_segment, k=3)` will be called by the LLM feedback pipeline (MVP0/MVP1) to inject relevant curriculum context into the prompt before generating instructor feedback.
-- `k` can be tuned; start with 3 and increase if LLM feedback lacks specificity.
+- [Supabase AI / vectors](https://supabase.com/docs/guides/ai)
+- [OpenAI cookbook: semantic search with Supabase](https://cookbook.openai.com/examples/vector_databases/supabase/semantic-search)
+- [pgvector](https://github.com/pgvector/pgvector)
