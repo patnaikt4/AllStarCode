@@ -1,20 +1,20 @@
+console.log("Route");
 import { randomUUID } from 'node:crypto'
-
-import PDFDocument from 'pdfkit'
 
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
+
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
 
-const LESSON_PLAN_BUCKET = 'lesson-plans'
-const FEEDBACK_BUCKET = 'feedback'
+const LESSON_PLAN_BUCKET = 'documents'
+const FEEDBACK_BUCKET = 'FeedbackforLessonPlans'
 
 type GenerateFeedbackRequest = {
   instructorId?: unknown
-  lessonPlanId?: unknown
+  fileId?: unknown
 }
 
 function isValidUuid(value: string) {
@@ -39,114 +39,55 @@ function isAdminRole(role: unknown): role is 'admin' {
   return role === 'admin'
 }
 
-async function createMockLessonPlanPdf(params: {
-  instructorId: string
-  lessonPlanId: string
-}) {
-  const { instructorId, lessonPlanId } = params
-
-  return await new Promise<Buffer>((resolve, reject) => {
-    const doc = new PDFDocument({
-      margin: 56,
-      size: 'LETTER',
-      info: {
-        Title: `Mock lesson plan ${lessonPlanId}`,
-        Author: 'AllStarCode',
-      },
-    })
-
-    const chunks: Buffer[] = []
-
-    doc.on('data', (chunk: Buffer) => {
-      chunks.push(chunk)
-    })
-
-    doc.on('end', () => {
-      resolve(Buffer.concat(chunks))
-    })
-
-    doc.on('error', reject)
-
-    doc.fontSize(18).text('AllStarCode Lesson Plan')
-    doc.moveDown(0.5)
-    doc
-      .fontSize(10)
-      .fillColor('#666666')
-      .text(`Instructor ID: ${instructorId}`)
-      .text(`Lesson Plan ID: ${lessonPlanId}`)
-
-    doc.moveDown()
-    doc.fillColor('#111111')
-    doc.fontSize(12).text(
-      [
-        'Objective: Students will explain variables and write simple JavaScript assignments.',
-        'Opening: Begin with a relatable warm-up that asks students how computers remember information.',
-        'Mini-lesson: Model variable declarations, naming conventions, and string versus number examples.',
-        'Guided practice: Students follow along and predict outputs before running code.',
-        'Independent practice: Students create a small profile card program using at least three variables.',
-        'Assessment: Exit ticket asking students to define a variable and explain when to use one.',
-        'Differentiation: Provide sentence frames, pair programming, and extension prompts for advanced learners.',
-      ].join('\n\n'),
-      { lineGap: 4 }
-    )
-
-    doc.end()
-  })
-}
-
 async function getLessonPlanPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
-  lessonPlanId: string
+  fileId: string
 }) {
-  const { supabase, instructorId, lessonPlanId } = params
+  const { supabase, instructorId, fileId } = params
 
-  const candidatePaths = [
-    `${instructorId}/${lessonPlanId}.pdf`,
-    `${lessonPlanId}.pdf`,
-    lessonPlanId,
-  ]
+  const { data: fileRow, error: fileError } = await supabase
+    .from('files')
+    .select('file_id, user_id, storage_path, original_name')
+    .eq('file_id', fileId)
+    .single()
 
-  for (const storagePath of candidatePaths) {
-    const { data, error } = await supabase.storage
-      .from(LESSON_PLAN_BUCKET)
-      .download(storagePath)
-
-    if (error || !data) {
-      continue
-    }
-
-    const arrayBuffer = await data.arrayBuffer()
-
-    return {
-      buffer: Buffer.from(arrayBuffer),
-      usedPlaceholder: false,
-    }
+  if (fileError || !fileRow) {
+    throw new Error('The selected uploaded file could not be found.')
   }
 
-  console.warn(
-    `Falling back to placeholder lesson plan PDF for lessonPlanId=${lessonPlanId}.`
-  )
+  if (fileRow.user_id !== instructorId) {
+    throw new Error('You are not allowed to generate feedback for this file.')
+  }
+
+  const { data, error } = await supabase.storage
+    .from(LESSON_PLAN_BUCKET)
+    .download(fileRow.storage_path)
+
+  if (error || !data) {
+    throw new Error(
+      `Uploaded lesson plan "${fileRow.original_name}" could not be found in storage.`
+    )
+  }
+
+  const arrayBuffer = await data.arrayBuffer()
 
   return {
-    buffer: await createMockLessonPlanPdf({
-      instructorId,
-      lessonPlanId,
-    }),
-    usedPlaceholder: true,
+    buffer: Buffer.from(arrayBuffer),
+    file: fileRow,
   }
 }
 
 async function storeFeedbackPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
-  lessonPlanId: string
+  fileId: string
   feedback: string
   pdfBuffer: Buffer
 }) {
-  const { supabase, instructorId, lessonPlanId, feedback, pdfBuffer } = params
-  const feedbackId = randomUUID()
-  const storagePath = `${instructorId}/${lessonPlanId}/${feedbackId}.pdf`
+  const { supabase, instructorId, fileId, feedback, pdfBuffer } = params
+  const fileToken = randomUUID()
+  const storagePath = `${instructorId}/${fileId}/${fileToken}.pdf`
 
   const { error: uploadError } = await supabase.storage
     .from(FEEDBACK_BUCKET)
@@ -160,19 +101,28 @@ async function storeFeedbackPdf(params: {
   }
 
   const { error: insertError } = await supabase.from('feedback').insert({
-    id: feedbackId,
     instructor_id: instructorId,
-    lesson_plan_id: lessonPlanId,
     storage_path: storagePath,
-    feedback_text: feedback,
+    feedback,
   })
 
   if (insertError) {
     throw new Error(`Failed to save feedback record: ${insertError.message}`)
   }
 
+  const { data: feedbackRow, error: selectError } = await supabase
+    .from('feedback')
+    .select('feedback_id')
+    .eq('instructor_id', instructorId)
+    .eq('storage_path', storagePath)
+    .single()
+
+  if (selectError || !feedbackRow) {
+    throw new Error('Feedback was generated but the saved record could not be loaded.')
+  }
+
   return {
-    feedbackId,
+    feedbackId: feedbackRow.feedback_id,
     storagePath,
   }
 }
@@ -189,13 +139,12 @@ export async function POST(request: Request) {
 
     const instructorId =
       typeof body.instructorId === 'string' ? body.instructorId.trim() : ''
-    const lessonPlanId =
-      typeof body.lessonPlanId === 'string' ? body.lessonPlanId.trim() : ''
+    const fileId = typeof body.fileId === 'string' ? body.fileId.trim() : ''
 
-    if (!instructorId || !lessonPlanId) {
+    if (!instructorId || !fileId) {
       return createErrorResponse(
         400,
-        'Request body must include instructorId and lessonPlanId.'
+        'Request body must include instructorId and fileId.'
       )
     }
 
@@ -233,22 +182,33 @@ export async function POST(request: Request) {
     const lessonPlanPdf = await getLessonPlanPdf({
       supabase,
       instructorId,
-      lessonPlanId,
+      fileId,
     })
 
+    console.log("Lesson Plan Pdf:");
+    console.log(lessonPlanPdf);
+
     const extractedText = await extractTextFromPdf(lessonPlanPdf.buffer)
+
+    console.log("Extracted text:");
+    console.log(extractedText);
+
     const feedback = await getFeedbackFromRag(extractedText)
+
+    console.log("Feedback:");
+    console.log(feedback);
+
     const feedbackPdf = await renderFeedbackPdf({
       title: 'AllStarCode Lesson Plan Feedback',
       instructorId,
-      lessonPlanId,
+      lessonPlanId: lessonPlanPdf.file.original_name,
       feedback,
     })
 
     const { feedbackId, storagePath } = await storeFeedbackPdf({
       supabase,
       instructorId,
-      lessonPlanId,
+      fileId,
       feedback,
       pdfBuffer: feedbackPdf,
     })
@@ -257,8 +217,8 @@ export async function POST(request: Request) {
       {
         success: true,
         feedbackId,
+        fileId,
         storagePath,
-        usedPlaceholderLessonPlan: lessonPlanPdf.usedPlaceholder,
       },
       200
     )

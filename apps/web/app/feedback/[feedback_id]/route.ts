@@ -1,7 +1,9 @@
 import { createClient } from '@/lib/supabase/server'
 
-function isValidUuid(value: string) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+const FEEDBACK_BUCKET = 'FeedbackforLessonPlans'
+
+function isValidFeedbackId(value: string) {
+  return /^\d+$/.test(value)
 }
 
 export async function GET(
@@ -12,7 +14,7 @@ export async function GET(
     const { feedback_id } = await params
 
     // 1) Validate input
-    if (!feedback_id || !isValidUuid(feedback_id)) {
+    if (!feedback_id || !isValidFeedbackId(feedback_id)) {
       return new Response('Invalid feedback_id', { status: 400 })
     }
 
@@ -23,7 +25,7 @@ export async function GET(
     const { data: row, error: dbError } = await supabase
       .from('feedback')
       .select('storage_path')
-      .eq('id', feedback_id)
+      .eq('feedback_id', Number(feedback_id))
       .single()
 
     if (dbError || !row) {
@@ -35,11 +37,9 @@ export async function GET(
     }
 
     // 4) Download PDF from storage
-    const bucketName = 'feedback' // replace with actual bucket name when known
-
     const { data: fileData, error: storageError } = await supabase
       .storage
-      .from(bucketName)
+      .from(FEEDBACK_BUCKET)
       .download(row.storage_path)
 
     if (storageError || !fileData) {
