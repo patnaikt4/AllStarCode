@@ -1,4 +1,3 @@
-console.log("Route");
 import { randomUUID } from 'node:crypto'
 
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
@@ -7,9 +6,10 @@ import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
 
-export const runtime = 'nodejs'
-
+// Supabase lesson plans live here.
 const LESSON_PLAN_BUCKET = 'documents'
+
+// Generated feedback PDFs are written here.
 const FEEDBACK_BUCKET = 'FeedbackforLessonPlans'
 
 type GenerateFeedbackRequest = {
@@ -17,14 +17,17 @@ type GenerateFeedbackRequest = {
   fileId?: unknown
 }
 
+// Guard helper for validating the instructorId coming from the client.
 function isValidUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
+// Standard JSON response helper so success/error payloads stay consistent.
 function jsonResponse(body: Record<string, unknown>, status: number) {
   return Response.json(body, { status })
 }
 
+// Convenience helper for returning typed error JSON to the client.
 function createErrorResponse(status: number, error: string) {
   return jsonResponse(
     {
@@ -34,11 +37,13 @@ function createErrorResponse(status: number, error: string) {
     status
   )
 }
-
+// Narrows profile.role so authorization checks stay type-safe.
 function isAdminRole(role: unknown): role is 'admin' {
   return role === 'admin'
 }
 
+// Loads a given lesson-plan PDF for the requested fileId.
+// The file must exist in the files table and belong to the target instructor.
 async function getLessonPlanPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
@@ -78,6 +83,7 @@ async function getLessonPlanPdf(params: {
   }
 }
 
+// Uploads generated feedback PDF to supabse storage and adds to client row
 async function storeFeedbackPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
@@ -127,6 +133,7 @@ async function storeFeedbackPdf(params: {
   }
 }
 
+// Accepts instructorId and fileId, adds feedback to storage, returns response
 export async function POST(request: Request) {
   try {
     let body: GenerateFeedbackRequest
@@ -137,6 +144,7 @@ export async function POST(request: Request) {
       return createErrorResponse(400, 'Request body must be valid JSON.')
     }
 
+    // Input jading
     const instructorId =
       typeof body.instructorId === 'string' ? body.instructorId.trim() : ''
     const fileId = typeof body.fileId === 'string' ? body.fileId.trim() : ''
@@ -152,6 +160,7 @@ export async function POST(request: Request) {
       return createErrorResponse(400, 'instructorId must be a valid UUID.')
     }
 
+    // Verify user has probably authority to generate feedback
     const supabase = await createClient()
     const {
       data: { user },
@@ -179,25 +188,20 @@ export async function POST(request: Request) {
       return createErrorResponse(403, 'You are not allowed to generate feedback for this instructor.')
     }
 
+    // Load the pdf of the given lesson plan
     const lessonPlanPdf = await getLessonPlanPdf({
       supabase,
       instructorId,
       fileId,
     })
 
-    console.log("Lesson Plan Pdf:");
-    console.log(lessonPlanPdf);
-
+    // Extract text from it
     const extractedText = await extractTextFromPdf(lessonPlanPdf.buffer)
 
-    console.log("Extracted text:");
-    console.log(extractedText);
-
+    // Run text through the rag
     const feedback = await getFeedbackFromRag(extractedText)
 
-    console.log("Feedback:");
-    console.log(feedback);
-
+    // Turn resulting text back into a pdf
     const feedbackPdf = await renderFeedbackPdf({
       title: 'AllStarCode Lesson Plan Feedback',
       instructorId,
@@ -205,6 +209,7 @@ export async function POST(request: Request) {
       feedback,
     })
 
+    // Store feedback in storage
     const { feedbackId, storagePath } = await storeFeedbackPdf({
       supabase,
       instructorId,
@@ -213,6 +218,7 @@ export async function POST(request: Request) {
       pdfBuffer: feedbackPdf,
     })
 
+    // Return jsonResponse object
     return jsonResponse(
       {
         success: true,
