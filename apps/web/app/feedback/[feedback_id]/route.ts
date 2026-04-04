@@ -2,10 +2,6 @@ import { createClient } from '@/lib/supabase/server'
 
 const FEEDBACK_BUCKET = 'FeedbackforLessonPlans'
 
-function isValidFeedbackId(value: string) {
-  return /^\d+$/.test(value)
-}
-
 export async function GET(
   _request: Request,
   { params }: { params: Promise<{ feedback_id: string }> }
@@ -14,7 +10,7 @@ export async function GET(
     const { feedback_id } = await params
 
     // 1) Validate input
-    if (!feedback_id || !isValidFeedbackId(feedback_id)) {
+    if (!feedback_id) {
       return new Response('Invalid feedback_id', { status: 400 })
     }
 
@@ -25,7 +21,7 @@ export async function GET(
     const { data: row, error: dbError } = await supabase
       .from('feedback')
       .select('storage_path')
-      .eq('feedback_id', Number(feedback_id))
+      .eq('id', feedback_id)
       .single()
 
     if (dbError || !row) {

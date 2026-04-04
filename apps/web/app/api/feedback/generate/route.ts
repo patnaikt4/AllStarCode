@@ -93,7 +93,7 @@ async function storeFeedbackPdf(params: {
 }) {
   const { supabase, instructorId, fileId, feedback, pdfBuffer } = params
   const fileToken = randomUUID()
-  const storagePath = `${instructorId}/${fileId}/${fileToken}.pdf`
+  const storagePath = `${instructorId}/${fileId}.pdf`
 
   const { error: uploadError } = await supabase.storage
     .from(FEEDBACK_BUCKET)
@@ -101,15 +101,18 @@ async function storeFeedbackPdf(params: {
       contentType: 'application/pdf',
       upsert: true,
     })
-
+  
   if (uploadError) {
     throw new Error(`Failed to upload feedback PDF: ${uploadError.message}`)
   }
 
   const { error: insertError } = await supabase.from('feedback').insert({
-    instructor_id: instructorId,
+    user_id: instructorId,
+    lesson_plan_id: fileId,
     storage_path: storagePath,
-    feedback,
+    feedback_text: feedback,
+    original_filename: `${fileId}.pdf`,
+    status: 'ready',
   })
 
   if (insertError) {
@@ -118,8 +121,8 @@ async function storeFeedbackPdf(params: {
 
   const { data: feedbackRow, error: selectError } = await supabase
     .from('feedback')
-    .select('feedback_id')
-    .eq('instructor_id', instructorId)
+    .select('id')
+    .eq('user_id', instructorId)
     .eq('storage_path', storagePath)
     .single()
 
@@ -128,7 +131,7 @@ async function storeFeedbackPdf(params: {
   }
 
   return {
-    feedbackId: feedbackRow.feedback_id,
+    feedbackId: feedbackRow.id,
     storagePath,
   }
 }
