@@ -21,7 +21,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from openai import OpenAI
@@ -50,7 +50,7 @@ CHUNK_OVERLAP = 200
 _openai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 _supabase = create_client(
     os.environ["NEXT_PUBLIC_SUPABASE_URL"],
-    os.environ["NEXT_PUBLIC_SUPABASE_ANON_KEY"],
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ["NEXT_PUBLIC_SUPABASE_ANON_KEY"],
 )
 
 
@@ -244,7 +244,7 @@ def clear_existing_chunks(source_doc: str) -> int:
 # ── Main entry point ─────────────────────────────────────────────────────
 
 
-def process_file(file_path: Path, base_dir: Path | None = None) -> int:
+def process_file(file_path: Path, base_dir: Optional[Path] = None) -> int:
     """
     Process a single curriculum file: read → chunk → embed → store.
 
@@ -271,7 +271,7 @@ def process_file(file_path: Path, base_dir: Path | None = None) -> int:
         return 0
 
     # Step 2: Split into chunks
-    chunks = chunk_text(text)
+    chunks = chunk_text(text, chunk_size=CHUNK_SIZE, overlap=CHUNK_OVERLAP)
     print(f"   Split into {len(chunks)} chunks (chunk_size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})")
 
     # Step 3: Clear old embeddings for this doc (prevents duplicates on re-run)
@@ -303,6 +303,7 @@ def main() -> int:
       --file <path>       Process a single file
       --docs-dir <path>   Process all .txt, .md, and .pdf files in a directory
     """
+    global CHUNK_SIZE, CHUNK_OVERLAP
     parser = argparse.ArgumentParser(
         description="Generate and store curriculum embeddings in Supabase."
     )
@@ -331,7 +332,6 @@ def main() -> int:
     args = parser.parse_args()
 
     # Update globals if custom values provided
-    global CHUNK_SIZE, CHUNK_OVERLAP
     CHUNK_SIZE = args.chunk_size
     CHUNK_OVERLAP = args.chunk_overlap
 

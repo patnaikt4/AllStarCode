@@ -205,16 +205,18 @@ function buildFeedbackPrompt({
   lessonPlanText: string
 }) {
   return `
-Review this lesson plan and provide concrete written feedback on how to improve it according to the AllStarCode curriculum.
+Review this lesson plan against the AllStarCode curriculum context provided below.
 
-Use the curriculum context when it is relevant. If the curriculum context is limited or placeholder text, still provide a best-effort review grounded in the lesson plan itself.
+If the curriculum context is placeholder text or empty, respond only with a brief message stating that this lesson plan does not appear to cover topics from the AllStarCode CS curriculum, and cannot be reviewed.
 
-Focus on:
-1. Alignment to objectives and curriculum expectations
-2. Clarity of directions, activities, and assessment
-3. Pacing and sequencing
-4. Inclusivity, accessibility, and student engagement
-5. Specific revisions the instructor should make
+If curriculum context is provided, your feedback must be grounded in that specific AllStarCode curriculum. Focus on:
+1. Which AllStarCode topics this lesson plan covers, partially covers, or misses entirely
+2. Where the lesson plan's approach, vocabulary, or activities diverge from AllStarCode's curriculum
+3. Specific changes to better align with AllStarCode's content and teaching expectations
+4. Clarity of directions, pacing, and student engagement relative to AllStarCode's style
+5. Concrete next steps to bring the lesson into closer alignment
+
+Do not give generic CS teaching advice. All feedback must reference what AllStarCode's curriculum actually covers.
 
 Return:
 - A brief overall assessment (a short paragraph, not an essay)
