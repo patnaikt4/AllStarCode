@@ -3,6 +3,7 @@ import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
 import LogoutButton from '@/components/LogoutButton'
 import AdminSelfService from '@/components/AdminSelfService'
+import InviteInstructor from '@/components/InviteInstructor'
 
 export default async function AdminPage() {
   const supabase = await createClient()
@@ -52,10 +53,12 @@ export default async function AdminPage() {
 
       <div className="instructor-main">
         <div className="instructor-topbar">
-          <p className="instructor-topbar-title">My Files</p>
+          <p className="instructor-topbar-title">Admin</p>
         </div>
-        {/* same upload + file list as instructor flow */}
-        <AdminSelfService />
+        <div style={{ padding: '1.5rem' }}>
+          <InviteInstructor />
+          <AdminSelfService />
+        </div>
       </div>
     </div>
   )

@@ -7,7 +7,6 @@ import { createClient } from '@/lib/supabase/client'
 export default function SignupPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
-  const [role, setRole] = useState<'instructor' | 'admin'>('instructor')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [checkEmail, setCheckEmail] = useState(false)
@@ -24,7 +23,6 @@ export default function SignupPage() {
       email,
       password,
       options: {
-        data: { role },
         emailRedirectTo: `${window.location.origin}/auth/callback`,
       },
     })
@@ -78,14 +76,6 @@ export default function SignupPage() {
           minLength={6}
           required
         />
-        <select
-          value={role}
-          onChange={(e) => setRole(e.target.value as 'instructor' | 'admin')}
-        >
-          <option value="instructor">Instructor</option>
-          <option value="admin">Admin</option>
-        </select>
-
         {error && <p className="error">{error}</p>}
 
         <button type="submit" disabled={loading}>

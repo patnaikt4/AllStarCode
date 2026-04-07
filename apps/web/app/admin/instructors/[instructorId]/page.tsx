@@ -36,7 +36,7 @@ export default async function InstructorDetailPage({
       .order('created_at', { ascending: false }),
     supabase
       .from('feedback')
-      .select('id, created_at')
+      .select('id, original_filename, feedback_text, lesson_plan_id, created_at')
       .eq('user_id', instructorId)
       .order('created_at', { ascending: false }),
     supabase
@@ -55,7 +55,22 @@ export default async function InstructorDetailPage({
       return { ...f, signedUrl: data?.signedUrl ?? null }
     })
   )
-  const feedback = feedbackRes.data ?? []
+
+  const rawFeedback = feedbackRes.data ?? []
+
+  // generate signed URLs for original lesson plan PDFs
+  const feedback = await Promise.all(
+    rawFeedback.map(async fb => {
+      let lessonPlanUrl: string | null = null
+      if (fb.lesson_plan_id) {
+        const path = `${instructorId}/${fb.lesson_plan_id}.pdf`
+        const { data } = await supabase.storage.from('lesson-plans').createSignedUrl(path, 3600)
+        lessonPlanUrl = data?.signedUrl ?? null
+      }
+      return { ...fb, lessonPlanUrl }
+    })
+  )
+
   const instructors = instructorsRes.data ?? []
 
   return (
@@ -127,29 +142,60 @@ export default async function InstructorDetailPage({
             )}
           </div>
 
-          {/* feedback — view opens the PDF route built by SWE 4 */}
+          {/* feedback threads */}
           <div className="admin-detail-section">
-            <p className="admin-detail-label">feedback ({feedback.length})</p>
+            <p className="admin-detail-label">lesson plan threads ({feedback.length})</p>
             {feedback.length === 0 ? (
               <p className="admin-empty">no feedback generated yet</p>
             ) : (
-              <div className="admin-file-list">
-                {feedback.map(fb => (
-                  <div key={fb.id} className="admin-file-row">
-                    <div className="admin-file-info">
-                      <span className="admin-file-name">feedback · {fb.id.slice(0, 8)}…</span>
-                      <span className="admin-file-date">{new Date(fb.created_at).toLocaleDateString()}</span>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
+                {feedback.map(fb => {
+                  const title = fb.original_filename
+                    ? fb.original_filename.replace(/\.pdf$/i, '')
+                    : `Lesson · ${new Date(fb.created_at).toLocaleDateString()}`
+                  const preview = fb.feedback_text
+                    ? fb.feedback_text.split('\n').find((l: string) => l.trim().length > 0)?.slice(0, 120)
+                    : null
+                  return (
+                    <div key={fb.id} style={{ border: '1px solid #e5e7eb', borderRadius: '0.5rem', padding: '1rem' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '0.4rem' }}>
+                        <div>
+                          <p style={{ fontWeight: 600, fontSize: '0.9rem', marginBottom: '0.2rem' }}>
+                            📄 {title}
+                          </p>
+                          <p style={{ fontSize: '0.75rem', color: '#6b7280' }}>
+                            {new Date(fb.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                          </p>
+                        </div>
+                        <div style={{ display: 'flex', gap: '0.5rem' }}>
+                          {fb.lessonPlanUrl && (
+                            <a
+                              href={fb.lessonPlanUrl}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="msg-action-btn"
+                            >
+                              ↓ Lesson Plan
+                            </a>
+                          )}
+                          <a
+                            href={`/feedback/${fb.id}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="msg-action-btn"
+                          >
+                            ↓ View Feedback
+                          </a>
+                        </div>
+                      </div>
+                      {preview && (
+                        <p style={{ fontSize: '0.8rem', color: '#374151', lineHeight: 1.5, borderTop: '1px solid #f3f4f6', paddingTop: '0.5rem' }}>
+                          {preview}…
+                        </p>
+                      )}
                     </div>
-                    <a
-                      href={`/feedback/${fb.id}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="msg-action-btn"
-                    >
-                      view
-                    </a>
-                  </div>
-                ))}
+                  )
+                })}
               </div>
             )}
           </div>
