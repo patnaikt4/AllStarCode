@@ -15,6 +15,7 @@ const LESSON_PLAN_BUCKET = 'lesson-plans'
 type GenerateFeedbackRequest = {
   instructorId?: unknown
   lessonPlanId?: unknown
+  originalFilename?: unknown
 }
 
 function isValidUuid(value: string) {
@@ -143,8 +144,9 @@ async function storeFeedbackPdf(params: {
   lessonPlanId: string
   feedback: string
   pdfBuffer: Buffer
+  originalFilename: string | null
 }) {
-  const { supabase, instructorId, lessonPlanId, feedback, pdfBuffer } = params
+  const { supabase, instructorId, lessonPlanId, feedback, pdfBuffer, originalFilename } = params
   const feedbackId = randomUUID()
   const storagePath = `${instructorId}/${lessonPlanId}/${feedbackId}.pdf`
 
@@ -163,8 +165,6 @@ async function storeFeedbackPdf(params: {
       `Failed to upload feedback PDF: ${uploadError.message}.${hint}`
     )
   }
-
-  const originalFilename = `${lessonPlanId.replace(/[/\\?%*:|"<>]/g, '-')}-feedback.pdf`
 
   const { error: insertError } = await supabase.from('feedback').insert({
     id: feedbackId,
@@ -200,6 +200,10 @@ export async function POST(request: Request) {
       typeof body.instructorId === 'string' ? body.instructorId.trim() : ''
     const lessonPlanId =
       typeof body.lessonPlanId === 'string' ? body.lessonPlanId.trim() : ''
+    const originalFilename =
+      typeof body.originalFilename === 'string' && body.originalFilename.trim()
+        ? body.originalFilename.trim()
+        : null
 
     if (!instructorId || !lessonPlanId) {
       return createErrorResponse(
@@ -260,6 +264,7 @@ export async function POST(request: Request) {
       lessonPlanId,
       feedback,
       pdfBuffer: feedbackPdf,
+      originalFilename,
     })
 
     return jsonResponse(

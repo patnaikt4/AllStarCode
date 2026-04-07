@@ -13,7 +13,8 @@ function isValidUuid(value: string) {
 
 function sanitizeFilename(name: string) {
   const trimmed = name.trim() || 'feedback.pdf'
-  return trimmed.replace(/[\r\n"]/g, '_')
+  // HTTP headers must be ASCII only — replace non-ASCII chars (e.g. em dashes) with hyphens
+  return trimmed.replace(/[^\x20-\x7E]/g, '-').replace(/[\r\n"]/g, '_')
 }
 
 /**
