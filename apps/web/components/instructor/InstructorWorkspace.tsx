@@ -3,9 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createClient } from '@/lib/supabase/client'
 import LogoutButton from '@/components/LogoutButton'
+import type { FeedbackStatus, SourceType } from '@/lib/feedback/status'
+import { FEEDBACK_STATUSES } from '@/lib/feedback/status'
 
 const LESSON_PLANS_BUCKET = 'lesson-plans'
 const NEW_THREAD_ID = 'new'
+
+const TERMINAL_STATUSES: FeedbackStatus[] = ['complete', 'failed']
+const POLL_INTERVAL_MS = 4000
 
 const RAG_WELCOME_TEXT =
   'Upload a lesson plan PDF (optional). Nothing is sent until you click Send. Add notes if you like, then Send to generate curriculum-aligned feedback. If you skip the upload, we use a built-in sample lesson plan.'
@@ -21,8 +26,10 @@ type RagMessage = {
   text: string
   time: string
   fileName?: string
-  fileKind?: 'pdf'
+  fileKind?: 'pdf' | 'video'
   feedbackId?: string
+  feedbackStatus?: string
+  sourceType?: string
   isError?: boolean
 }
 
@@ -91,7 +98,7 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
     async function loadHistory() {
       const { data } = await supabase
         .from('feedback')
-        .select('id, original_filename, created_at')
+        .select('id, original_filename, status, source_type, created_at')
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
         .limit(30)
@@ -106,6 +113,24 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
       const historySessions: Record<string, RagSession> = {}
       for (const row of data) {
         const time = row.created_at ? formatTime(row.created_at) : formatNow()
+        const status = (row.status as FeedbackStatus) ?? 'complete'
+        const sourceType = (row.source_type as SourceType) ?? 'pdf'
+
+        let assistantText: string
+        let isError = false
+        if (status === 'complete') {
+          assistantText = 'Your feedback PDF is ready. Open it for the full write-up.'
+        } else if (status === 'failed') {
+          assistantText = 'Feedback generation failed. Please try again.'
+          isError = true
+        } else if (status === 'uploaded') {
+          assistantText = 'Upload received. Waiting to start processing...'
+        } else if (status === 'transcribing') {
+          assistantText = 'Transcribing your video...'
+        } else {
+          assistantText = 'Generating feedback...'
+        }
+
         historySessions[row.id] = {
           messages: [
             {
@@ -114,15 +139,18 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
               text: 'Please review this lesson plan and suggest improvements.',
               time,
               ...(row.original_filename
-                ? { fileName: row.original_filename, fileKind: 'pdf' as const }
+                ? { fileName: row.original_filename, fileKind: sourceType as 'pdf' | 'video' }
                 : {}),
             },
             {
               id: `assistant-${row.id}`,
               role: 'assistant',
-              text: 'Your feedback PDF is ready. Open it for the full write-up.',
+              text: assistantText,
               time,
-              feedbackId: row.id,
+              feedbackId: status === 'complete' ? row.id : undefined,
+              feedbackStatus: status,
+              sourceType,
+              isError,
             },
           ],
           lessonPlanId: null,
@@ -140,6 +168,80 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
 
     void loadHistory()
   }, [supabase, userId])
+
+  // Poll for in-progress feedback items until they reach a terminal state.
+  useEffect(() => {
+    function getInProgressIds(): string[] {
+      const ids: string[] = []
+      for (const [threadId, session] of Object.entries(sessions)) {
+        if (threadId === NEW_THREAD_ID) continue
+        for (const msg of session.messages) {
+          if (
+            msg.role === 'assistant' &&
+            msg.feedbackStatus &&
+            !TERMINAL_STATUSES.includes(msg.feedbackStatus as FeedbackStatus)
+          ) {
+            ids.push(threadId)
+          }
+        }
+      }
+      return ids
+    }
+
+    const pending = getInProgressIds()
+    if (pending.length === 0) return
+
+    const timer = setInterval(async () => {
+      const { data: rows } = await supabase
+        .from('feedback')
+        .select('id, status, source_type')
+        .in('id', pending)
+
+      if (!rows || rows.length === 0) return
+
+      setSessions((prev) => {
+        const next = { ...prev }
+        for (const row of rows) {
+          const s = next[row.id]
+          if (!s) continue
+          const status = row.status as FeedbackStatus
+          const oldAssistant = s.messages.find(
+            (m) => m.id === `assistant-${row.id}`
+          )
+          if (!oldAssistant || oldAssistant.feedbackStatus === status) continue
+
+          let text: string
+          let isError = false
+          let feedbackId: string | undefined
+          if (status === 'complete') {
+            text = 'Your feedback PDF is ready. Open it for the full write-up.'
+            feedbackId = row.id
+          } else if (status === 'failed') {
+            text = 'Feedback generation failed. Please try again.'
+            isError = true
+          } else if (status === 'uploaded') {
+            text = 'Upload received. Waiting to start processing...'
+          } else if (status === 'transcribing') {
+            text = 'Transcribing your video...'
+          } else {
+            text = 'Generating feedback...'
+          }
+
+          next[row.id] = {
+            ...s,
+            messages: s.messages.map((m) =>
+              m.id === `assistant-${row.id}`
+                ? { ...m, text, feedbackStatus: status, feedbackId, isError }
+                : m
+            ),
+          }
+        }
+        return next
+      })
+    }, POLL_INTERVAL_MS)
+
+    return () => clearInterval(timer)
+  }, [sessions, supabase])
 
   const activeSession = sessions[activeId] ?? welcomeSession()
   const activeThread = threads.find((t) => t.id === activeId)
@@ -399,15 +501,25 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
                       : undefined
                   }
                 >
-                  {m.fileName && m.fileKind === 'pdf' && (
+                  {m.fileName && m.fileKind && (
                     <div className="file-chip">
-                      <span className="file-chip-icon">PDF</span>
+                      <span className="file-chip-icon">{m.fileKind === 'video' ? '▶' : 'PDF'}</span>
                       {m.fileName}
                     </div>
                   )}
                   {m.text}
                 </div>
                 <span className="msg-time">{m.time}</span>
+                {m.role === 'assistant' && m.feedbackStatus && !m.isError && m.feedbackStatus !== 'complete' && (
+                  <span style={{ fontSize: '0.75rem', color: '#6b7280', marginTop: 4, display: 'inline-block' }}>
+                    Status: {m.feedbackStatus}
+                  </span>
+                )}
+                {m.role === 'assistant' && m.sourceType && (
+                  <span style={{ fontSize: '0.7rem', color: '#9ca3af', marginTop: 2, display: 'inline-block', marginLeft: m.feedbackStatus && m.feedbackStatus !== 'complete' ? 8 : 0 }}>
+                    {m.sourceType === 'video' ? '▶ Video' : '📄 PDF'}
+                  </span>
+                )}
                 {m.role === 'assistant' && m.feedbackId && !m.isError && (
                   <a
                     className="msg-action-btn"

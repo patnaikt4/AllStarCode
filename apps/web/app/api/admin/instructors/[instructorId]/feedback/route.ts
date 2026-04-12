@@ -42,7 +42,7 @@ export async function GET(_request: Request, context: RouteContext) {
   const { data: feedbackRows, error: feedbackError } = await supabase
     .from('feedback')
     .select(
-      'id, user_id, lesson_plan_id, original_filename, status, created_at, storage_path, feedback_text'
+      'id, user_id, lesson_plan_id, original_filename, status, source_type, created_at, storage_path, feedback_text'
     )
     .eq('user_id', instructorId)
     .order('created_at', { ascending: false })

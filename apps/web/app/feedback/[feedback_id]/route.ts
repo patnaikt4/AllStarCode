@@ -42,7 +42,7 @@ export async function GET(
     const { data: row, error: dbError } = await supabase
       .from('feedback')
       .select(
-        'storage_path, user_id, original_filename, status, created_at, lesson_plan_id'
+        'storage_path, user_id, original_filename, status, source_type, created_at, lesson_plan_id'
       )
       .eq('id', feedback_id)
       .single()
@@ -58,6 +58,20 @@ export async function GET(
     )
     if (denied) {
       return denied
+    }
+
+    if (row.status === 'failed') {
+      return Response.json(
+        { error: 'Feedback generation failed.', status: 'failed' },
+        { status: 422 }
+      )
+    }
+
+    if (row.status !== 'complete') {
+      return Response.json(
+        { error: 'Feedback is not ready yet.', status: row.status },
+        { status: 425 }
+      )
     }
 
     if (!row.storage_path) {
@@ -76,6 +90,7 @@ export async function GET(
     const filename = sanitizeFilename(String(row.original_filename ?? 'feedback.pdf'))
     const createdAt = String(row.created_at ?? '')
     const status = String(row.status ?? '')
+    const sourceType = String(row.source_type ?? 'pdf')
     const lessonPlanId = String(row.lesson_plan_id ?? '')
 
     return new Response(arrayBuffer, {
@@ -85,6 +100,7 @@ export async function GET(
         'Content-Disposition': `inline; filename="${filename}"`,
         'X-Feedback-Id': feedback_id,
         'X-Feedback-Status': status,
+        'X-Source-Type': sourceType,
         'X-Feedback-Created-At': createdAt,
         'X-Lesson-Plan-Id': lessonPlanId,
         'X-Original-Filename': filename,

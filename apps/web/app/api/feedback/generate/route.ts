@@ -5,6 +5,7 @@ import PDFDocument from 'pdfkit'
 import { getFeedbackStorageBucket } from '@/lib/feedback/feedback-storage-bucket'
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
+import type { FeedbackStatus, SourceType } from '@/lib/feedback/status'
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
 
@@ -138,16 +139,65 @@ async function getLessonPlanPdf(params: {
   }
 }
 
-async function storeFeedbackPdf(params: {
+async function createFeedbackRow(params: {
+  supabase: Awaited<ReturnType<typeof createClient>>
+  feedbackId: string
+  instructorId: string
+  lessonPlanId: string
+  originalFilename: string | null
+  sourceType: SourceType
+  initialStatus: FeedbackStatus
+}) {
+  const { supabase, feedbackId, instructorId, lessonPlanId, originalFilename, sourceType, initialStatus } = params
+
+  const { error } = await supabase.from('feedback').insert({
+    id: feedbackId,
+    user_id: instructorId,
+    lesson_plan_id: lessonPlanId,
+    original_filename: originalFilename ?? 'feedback.pdf',
+    source_type: sourceType,
+    status: initialStatus,
+  })
+
+  if (error) {
+    throw new Error(`Failed to create feedback record: ${error.message}`)
+  }
+}
+
+async function updateFeedbackStatus(params: {
+  supabase: Awaited<ReturnType<typeof createClient>>
+  feedbackId: string
+  status: FeedbackStatus
+  storagePath?: string
+  feedbackText?: string
+}) {
+  const { supabase, feedbackId, status, storagePath, feedbackText } = params
+
+  const update: Record<string, unknown> = {
+    status,
+    updated_at: new Date().toISOString(),
+  }
+  if (storagePath !== undefined) update.storage_path = storagePath
+  if (feedbackText !== undefined) update.feedback_text = feedbackText
+
+  const { error } = await supabase
+    .from('feedback')
+    .update(update)
+    .eq('id', feedbackId)
+
+  if (error) {
+    throw new Error(`Failed to update feedback status: ${error.message}`)
+  }
+}
+
+async function uploadFeedbackPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
   lessonPlanId: string
-  feedback: string
+  feedbackId: string
   pdfBuffer: Buffer
-  originalFilename: string | null
 }) {
-  const { supabase, instructorId, lessonPlanId, feedback, pdfBuffer, originalFilename } = params
-  const feedbackId = randomUUID()
+  const { supabase, instructorId, lessonPlanId, feedbackId, pdfBuffer } = params
   const storagePath = `${instructorId}/${lessonPlanId}/${feedbackId}.pdf`
 
   const { error: uploadError } = await supabase.storage
@@ -166,24 +216,7 @@ async function storeFeedbackPdf(params: {
     )
   }
 
-  const { error: insertError } = await supabase.from('feedback').insert({
-    id: feedbackId,
-    user_id: instructorId,
-    lesson_plan_id: lessonPlanId,
-    storage_path: storagePath,
-    feedback_text: feedback,
-    original_filename: originalFilename,
-    status: 'ready',
-  })
-
-  if (insertError) {
-    throw new Error(`Failed to save feedback record: ${insertError.message}`)
-  }
-
-  return {
-    feedbackId,
-    storagePath,
-  }
+  return storagePath
 }
 
 export async function POST(request: Request) {
@@ -243,39 +276,74 @@ export async function POST(request: Request) {
       return createErrorResponse(403, 'You are not allowed to generate feedback for this instructor.')
     }
 
-    const lessonPlanPdf = await getLessonPlanPdf({
-      supabase,
-      instructorId,
-      lessonPlanId,
-    })
+    const feedbackId = randomUUID()
+    const sourceType: SourceType = 'pdf'
 
-    const extractedText = await extractTextFromPdf(lessonPlanPdf.buffer)
-    const feedback = await getFeedbackFromRag(extractedText)
-    const feedbackPdf = await renderFeedbackPdf({
-      title: 'AllStarCode Lesson Plan Feedback',
-      instructorId,
-      lessonPlanId,
-      feedback,
-    })
-
-    const { feedbackId, storagePath } = await storeFeedbackPdf({
+    // Phase 1: insert a row immediately so the UI can show progress.
+    await createFeedbackRow({
       supabase,
+      feedbackId,
       instructorId,
       lessonPlanId,
-      feedback,
-      pdfBuffer: feedbackPdf,
       originalFilename,
+      sourceType,
+      initialStatus: 'generating',
     })
 
-    return jsonResponse(
-      {
-        success: true,
+    try {
+      const lessonPlanPdf = await getLessonPlanPdf({
+        supabase,
+        instructorId,
+        lessonPlanId,
+      })
+
+      const extractedText = await extractTextFromPdf(lessonPlanPdf.buffer)
+      const feedback = await getFeedbackFromRag(extractedText)
+      const feedbackPdf = await renderFeedbackPdf({
+        title: 'AllStarCode Lesson Plan Feedback',
+        instructorId,
+        lessonPlanId,
+        feedback,
+      })
+
+      // Phase 2: upload PDF and mark complete.
+      const storagePath = await uploadFeedbackPdf({
+        supabase,
+        instructorId,
+        lessonPlanId,
         feedbackId,
+        pdfBuffer: feedbackPdf,
+      })
+
+      await updateFeedbackStatus({
+        supabase,
+        feedbackId,
+        status: 'complete',
         storagePath,
-        usedPlaceholderLessonPlan: lessonPlanPdf.usedPlaceholder,
-      },
-      200
-    )
+        feedbackText: feedback,
+      })
+
+      return jsonResponse(
+        {
+          success: true,
+          feedbackId,
+          storagePath,
+          usedPlaceholderLessonPlan: lessonPlanPdf.usedPlaceholder,
+        },
+        200
+      )
+    } catch (pipelineError) {
+      // Mark the row as failed so the UI can reflect the error.
+      await updateFeedbackStatus({
+        supabase,
+        feedbackId,
+        status: 'failed',
+      }).catch((updateErr) => {
+        console.error('Failed to mark feedback as failed:', updateErr)
+      })
+
+      throw pipelineError
+    }
   } catch (error) {
     const message =
       error instanceof Error ? error.message : 'Failed to generate feedback.'

@@ -3,6 +3,7 @@ import {
   getSessionUser,
   requireMatchingUserId,
 } from '@/lib/feedback/feedback-route-auth'
+import type { FeedbackStatus, SourceType } from '@/lib/feedback/status'
 
 function isValidUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -15,9 +16,10 @@ export type FeedbackHistoryItem = {
   user_id: string
   lesson_plan_id: string
   original_filename: string
-  status: string
+  status: FeedbackStatus
+  source_type: SourceType
   created_at: string
-  storage_path: string
+  storage_path: string | null
 }
 
 /**
@@ -50,7 +52,7 @@ export async function GET(
     const { data: rows, error } = await supabase
       .from('feedback')
       .select(
-        'id, user_id, lesson_plan_id, original_filename, status, created_at, storage_path'
+        'id, user_id, lesson_plan_id, original_filename, status, source_type, created_at, storage_path'
       )
       .eq('user_id', userId)
       .order('created_at', { ascending: false })
@@ -65,9 +67,10 @@ export async function GET(
       user_id: row.user_id as string,
       lesson_plan_id: row.lesson_plan_id as string,
       original_filename: row.original_filename as string,
-      status: row.status as string,
+      status: row.status as FeedbackStatus,
+      source_type: row.source_type as SourceType,
       created_at: row.created_at as string,
-      storage_path: row.storage_path as string,
+      storage_path: (row.storage_path as string | null) ?? null,
     }))
 
     return Response.json({ items })
