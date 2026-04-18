@@ -7,7 +7,6 @@ import InstructorDashboardClient, {
 import { createClient } from '@/lib/supabase/server'
 
 export default async function InstructorDashboardPage() {
-  console.log("Dashboard loaded");
   const supabase = await createClient()
   const {
     data: { user },

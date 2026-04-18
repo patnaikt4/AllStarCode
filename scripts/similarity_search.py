@@ -25,7 +25,7 @@ EMBEDDING_DIMENSIONS = 1536
 _openai = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
 _supabase = create_client(
     os.environ["NEXT_PUBLIC_SUPABASE_URL"],
-    os.environ["NEXT_PUBLIC_SUPABASE_ANON_KEY"],
+    os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ["NEXT_PUBLIC_SUPABASE_ANON_KEY"],
 )
 
 
@@ -47,12 +47,18 @@ def get_query_embedding(query: str) -> List[float]:
     return response.data[0].embedding
 
 
+MIN_SIMILARITY = 0.15
+
+
 def get_similar_chunks(query: str, k: int = 3) -> List[Dict]:
     """
     Retrieve top-k most similar curriculum chunks for the given query.
 
     Embeds the query text, then uses pgvector's cosine distance operator (<=>)
     in Supabase to return the nearest stored curriculum chunks.
+    Chunks with similarity below MIN_SIMILARITY are filtered out so that
+    irrelevant documents (e.g. a history syllabus) return nothing rather than
+    forcing unrelated CS curriculum context.
 
     Args:
         query (str): Search text (e.g. a segment of an instructor transcript).
@@ -75,7 +81,7 @@ def get_similar_chunks(query: str, k: int = 3) -> List[Dict]:
         },
     ).execute()
 
-    return response.data
+    return [chunk for chunk in response.data if (chunk.get("similarity") or 0) >= MIN_SIMILARITY]
 
 
 def main() -> int:

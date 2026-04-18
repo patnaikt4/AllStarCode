@@ -12,7 +12,29 @@ type SimilarChunk = {
 
 const DEFAULT_RETRIEVAL_COUNT = 3
 const DEFAULT_FEEDBACK_MODEL = process.env.OPENAI_FEEDBACK_MODEL ?? 'gpt-5-mini'
+/** Enough for assessment + 4–6 detailed bullets + revisions (900 was truncating mid-list). */
+const DEFAULT_MAX_OUTPUT_TOKENS = 4096
 const PLACEHOLDER_CURRICULUM_CONTEXT = '[Placeholder: curriculum context]'
+
+function getMaxOutputTokens(): number {
+  const raw = process.env.OPENAI_FEEDBACK_MAX_OUTPUT_TOKENS?.trim()
+  if (!raw) {
+    return DEFAULT_MAX_OUTPUT_TOKENS
+  }
+  const n = Number.parseInt(raw, 10)
+  if (!Number.isFinite(n) || n < 1) {
+    return DEFAULT_MAX_OUTPUT_TOKENS
+  }
+  return Math.min(n, 16_000)
+}
+
+/** Strip lone UTF-16 surrogates so strings are valid UTF-8 for Python stdin and APIs. */
+function stripInvalidUtf16Scalars(s: string): string {
+  return s.replace(
+    /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/gu,
+    ''
+  )
+}
 
 const FEEDBACK_SYSTEM_PROMPT = `You are an instructional coach reviewing lesson plans for alignment with the AllStarCode curriculum.
 
@@ -25,7 +47,9 @@ Prioritize:
 - inclusivity, accessibility, and student engagement
 - actionable revisions the instructor can make next
 
-Keep the tone supportive, specific, and practical.`
+Keep the tone supportive, specific, and practical.
+
+Be succinct: prefer tight bullets over long prose. State the insight and one concrete fix per bullet; avoid repeating the lesson plan back. Skip lengthy quoted examples unless a single short phrase illustrates the point.`
 
 function toErrorMessage(error: unknown) {
   if (error instanceof Error && error.message) {
@@ -123,8 +147,11 @@ async function retrieveCurriculumContext(
     return PLACEHOLDER_CURRICULUM_CONTEXT
   }
 
+  const queryText = stripInvalidUtf16Scalars(extractedLessonPlanText)
+
   return await new Promise<string>((resolve) => {
-    const child = spawn('python3', [scriptPath, '--k', String(k)], {
+    const python = process.platform === 'win32' ? 'python' : 'python3'
+    const child = spawn(python, [scriptPath, '--k', String(k)], {
       stdio: ['pipe', 'pipe', 'pipe'],
     })
 
@@ -165,7 +192,7 @@ async function retrieveCurriculumContext(
       }
     })
 
-    child.stdin.write(extractedLessonPlanText)
+    child.stdin.write(queryText, 'utf8')
     child.stdin.end()
   })
 }
@@ -178,21 +205,25 @@ function buildFeedbackPrompt({
   lessonPlanText: string
 }) {
   return `
-Review this lesson plan and provide concrete written feedback on how to improve it according to the AllStarCode curriculum.
+Review this lesson plan against the AllStarCode curriculum context provided below.
 
-Use the curriculum context when it is relevant. If the curriculum context is limited or placeholder text, still provide a best-effort review grounded in the lesson plan itself.
+If the curriculum context is placeholder text or empty, respond only with a brief message stating that this lesson plan does not appear to cover topics from the AllStarCode CS curriculum, and cannot be reviewed.
 
-Focus on:
-1. Alignment to objectives and curriculum expectations
-2. Clarity of directions, activities, and assessment
-3. Pacing and sequencing
-4. Inclusivity, accessibility, and student engagement
-5. Specific revisions the instructor should make
+If curriculum context is provided, your feedback must be grounded in that specific AllStarCode curriculum. Focus on:
+1. Which AllStarCode topics this lesson plan covers, partially covers, or misses entirely
+2. Where the lesson plan's approach, vocabulary, or activities diverge from AllStarCode's curriculum
+3. Specific changes to better align with AllStarCode's content and teaching expectations
+4. Clarity of directions, pacing, and student engagement relative to AllStarCode's style
+5. Concrete next steps to bring the lesson into closer alignment
+
+Do not give generic CS teaching advice. All feedback must reference what AllStarCode's curriculum actually covers.
 
 Return:
-- A brief overall assessment
-- 4 to 6 actionable feedback bullets
-- A short "Suggested revisions" section with the most important next steps
+- A brief overall assessment (a short paragraph, not an essay)
+- 4 to 6 actionable feedback bullets: each bullet = one line title or bold lead, then at most 2–3 short sentences or sub-bullets—no multi-paragraph items
+- A short "Suggested revisions" section (3–5 tight bullets for next steps)
+
+Style: succinct throughout. Do not pad with restating syllabus content; get to recommendations quickly.
 
 Curriculum context:
 ${curriculumContext}
@@ -205,7 +236,7 @@ ${lessonPlanText}
 export async function getFeedbackFromRag(
   extractedLessonPlanText: string
 ): Promise<string> {
-  const lessonPlanText = extractedLessonPlanText.trim()
+  const lessonPlanText = stripInvalidUtf16Scalars(extractedLessonPlanText).trim()
 
   if (!lessonPlanText) {
     throw new Error('Cannot generate feedback from empty lesson plan text.')
@@ -225,7 +256,7 @@ export async function getFeedbackFromRag(
       curriculumContext,
       lessonPlanText,
     }),
-    max_output_tokens: 900,
+    max_output_tokens: getMaxOutputTokens(),
   })
 
   const feedback = response.output_text.trim()

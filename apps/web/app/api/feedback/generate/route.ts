@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
+import { getFeedbackStorageBucket } from '@/lib/feedback/feedback-storage-bucket'
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
 
@@ -9,12 +10,10 @@ import { createClient } from '@/lib/supabase/server'
 // Supabase lesson plans live here.
 const LESSON_PLAN_BUCKET = 'documents'
 
-// Generated feedback PDFs are written here.
-const FEEDBACK_BUCKET = 'FeedbackforLessonPlans'
-
 type GenerateFeedbackRequest = {
   instructorId?: unknown
-  fileId?: unknown
+  lessonPlanId?: unknown
+  originalFilename?: unknown
 }
 
 // Guard helper for validating the instructorId coming from the client.
@@ -37,24 +36,25 @@ function createErrorResponse(status: number, error: string) {
     status
   )
 }
+
 // Narrows profile.role so authorization checks stay type-safe.
 function isAdminRole(role: unknown): role is 'admin' {
   return role === 'admin'
 }
 
-// Loads a given lesson-plan PDF for the requested fileId.
+// Loads a given lesson-plan PDF for the requested lessonPlanId.
 // The file must exist in the files table and belong to the target instructor.
 async function getLessonPlanPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
-  fileId: string
+  lessonPlanId: string
 }) {
-  const { supabase, instructorId, fileId } = params
+  const { supabase, instructorId, lessonPlanId } = params
 
   const { data: fileRow, error: fileError } = await supabase
     .from('files')
     .select('file_id, user_id, storage_path, original_name')
-    .eq('file_id', fileId)
+    .eq('file_id', lessonPlanId)
     .single()
 
   if (fileError || !fileRow) {
@@ -83,35 +83,42 @@ async function getLessonPlanPdf(params: {
   }
 }
 
-// Uploads generated feedback PDF to supabse storage and adds to client row
+// Uploads generated feedback PDF to supabase storage and adds to client row
 async function storeFeedbackPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
-  fileId: string
+  lessonPlanId: string
   feedback: string
   pdfBuffer: Buffer
+  originalFilename: string | null
 }) {
-  const { supabase, instructorId, fileId, feedback, pdfBuffer } = params
-  const fileToken = randomUUID()
-  const storagePath = `${instructorId}/${fileId}.pdf`
+  const { supabase, instructorId, lessonPlanId, feedback, pdfBuffer, originalFilename } = params
+  const feedbackId = randomUUID()
+  const storagePath = `${instructorId}/${lessonPlanId}/${feedbackId}.pdf`
 
   const { error: uploadError } = await supabase.storage
-    .from(FEEDBACK_BUCKET)
+    .from(getFeedbackStorageBucket())
     .upload(storagePath, pdfBuffer, {
       contentType: 'application/pdf',
       upsert: true,
     })
-  
+
   if (uploadError) {
-    throw new Error(`Failed to upload feedback PDF: ${uploadError.message}`)
+    const hint = /bucket not found/i.test(uploadError.message)
+      ? ` In Supabase, create a private Storage bucket with id "${getFeedbackStorageBucket()}" (or set FEEDBACK_STORAGE_BUCKET to your bucket name).`
+      : ''
+    throw new Error(
+      `Failed to upload feedback PDF: ${uploadError.message}.${hint}`
+    )
   }
 
   const { error: insertError } = await supabase.from('feedback').insert({
+    id: feedbackId,
     user_id: instructorId,
-    lesson_plan_id: fileId,
+    lesson_plan_id: lessonPlanId,
     storage_path: storagePath,
     feedback_text: feedback,
-    original_filename: `${fileId}.pdf`,
+    original_filename: originalFilename,
     status: 'ready',
   })
 
@@ -136,7 +143,7 @@ async function storeFeedbackPdf(params: {
   }
 }
 
-// Accepts instructorId and fileId, adds feedback to storage, returns response
+// Accepts instructorId and lessonPlanId, adds feedback to storage, returns response
 export async function POST(request: Request) {
   try {
     let body: GenerateFeedbackRequest
@@ -147,15 +154,20 @@ export async function POST(request: Request) {
       return createErrorResponse(400, 'Request body must be valid JSON.')
     }
 
-    // Input jading
+    // Input parsing
     const instructorId =
       typeof body.instructorId === 'string' ? body.instructorId.trim() : ''
-    const fileId = typeof body.fileId === 'string' ? body.fileId.trim() : ''
+    const lessonPlanId =
+      typeof body.lessonPlanId === 'string' ? body.lessonPlanId.trim() : ''
+    const originalFilename =
+      typeof body.originalFilename === 'string' && body.originalFilename.trim()
+        ? body.originalFilename.trim()
+        : null
 
-    if (!instructorId || !fileId) {
+    if (!instructorId || !lessonPlanId) {
       return createErrorResponse(
         400,
-        'Request body must include instructorId and fileId.'
+        'Request body must include instructorId and lessonPlanId.'
       )
     }
 
@@ -163,7 +175,7 @@ export async function POST(request: Request) {
       return createErrorResponse(400, 'instructorId must be a valid UUID.')
     }
 
-    // Verify user has probably authority to generate feedback
+    // Verify user has authority to generate feedback
     const supabase = await createClient()
     const {
       data: { user },
@@ -195,7 +207,7 @@ export async function POST(request: Request) {
     const lessonPlanPdf = await getLessonPlanPdf({
       supabase,
       instructorId,
-      fileId,
+      lessonPlanId,
     })
 
     // Extract text from it
@@ -216,17 +228,17 @@ export async function POST(request: Request) {
     const { feedbackId, storagePath } = await storeFeedbackPdf({
       supabase,
       instructorId,
-      fileId,
+      lessonPlanId,
       feedback,
       pdfBuffer: feedbackPdf,
+      originalFilename,
     })
 
-    // Return jsonResponse object
     return jsonResponse(
       {
         success: true,
         feedbackId,
-        fileId,
+        lessonPlanId,
         storagePath,
       },
       200

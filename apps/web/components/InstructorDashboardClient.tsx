@@ -145,7 +145,7 @@ export default function InstructorDashboardClient({
     }
   }
 
-  async function handleGenerateFeedback(fileId: string) {
+  async function handleGenerateFeedback(fileId: string, fileName: string) {
     setGenerateError(null)
     setUploadError(null)
 
@@ -159,7 +159,8 @@ export default function InstructorDashboardClient({
         },
         body: JSON.stringify({
           instructorId,
-          fileId,
+          lessonPlanId: fileId,
+          originalFilename: fileName,
         }),
       })
 
@@ -281,7 +282,7 @@ export default function InstructorDashboardClient({
                         <button
                           type="button"
                           className="dashboard-secondary-button"
-                          onClick={() => handleGenerateFeedback(row.fileId)}
+                          onClick={() => handleGenerateFeedback(row.fileId, row.fileName)}
                           disabled={isGenerating}
                         >
                           {isGenerating ? 'Generating...' : isReady ? 'Regenerate feedback' : 'Generate feedback'}
