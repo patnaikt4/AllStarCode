@@ -35,15 +35,28 @@ export default function AdminSelfService() {
   async function handleUpload(file: File) {
     setUploading(true)
     setError(null)
-    const form = new FormData()
-    form.append('file', file)
-    const res = await fetch('/api/files/upload', { method: 'POST', body: form })
-    if (res.ok) {
-      await loadFiles()
-    } else {
-      setError(await res.text())
+  
+    try {
+      const form = new FormData()
+      form.append('file', file)
+  
+      const res = await fetch('/api/files/upload', {
+        method: 'POST',
+        body: form,
+      })
+  
+      if (res.ok) {
+        await loadFiles()
+      } else {
+        const data = await res.json().catch(() => null)
+        setError(data?.error?.message ?? 'Upload failed.')
+      }
+    } catch (error) {
+      console.error('upload request failed:', error)
+      setError('Upload failed.')
+    } finally {
+      setUploading(false)
     }
-    setUploading(false)
   }
 
   // generates a short-lived signed URL and opens it in a new tab

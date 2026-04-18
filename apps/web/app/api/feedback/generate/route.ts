@@ -7,13 +7,20 @@ import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
 
-// Supabase lesson plans live here.
+export const runtime = 'nodejs'
+
 const LESSON_PLAN_BUCKET = 'documents'
+const UPLOADED_FILES_BUCKET = 'documents'
 
 type GenerateFeedbackRequest = {
   instructorId?: unknown
   lessonPlanId?: unknown
   originalFilename?: unknown
+  file_id?: unknown
+}
+
+type HttpError = Error & {
+  status?: number
 }
 
 // Guard helper for validating the instructorId coming from the client.
@@ -42,8 +49,68 @@ function isAdminRole(role: unknown): role is 'admin' {
   return role === 'admin'
 }
 
-// Loads a given lesson-plan PDF for the requested lessonPlanId.
-// The file must exist in the files table and belong to the target instructor.
+function createHttpError(status: number, message: string) {
+  const error = new Error(message) as HttpError
+  error.status = status
+  return error
+}
+
+async function createMockLessonPlanPdf(params: {
+  instructorId: string
+  lessonPlanId: string
+}) {
+  const { instructorId, lessonPlanId } = params
+
+  return await new Promise<Buffer>((resolve, reject) => {
+    const doc = new PDFDocument({
+      margin: 56,
+      size: 'LETTER',
+      info: {
+        Title: `Mock lesson plan ${lessonPlanId}`,
+        Author: 'AllStarCode',
+      },
+    })
+
+    const chunks: Buffer[] = []
+
+    doc.on('data', (chunk: Buffer) => {
+      chunks.push(chunk)
+    })
+
+    doc.on('end', () => {
+      resolve(Buffer.concat(chunks))
+    })
+
+    doc.on('error', reject)
+
+    doc.fontSize(18).text('AllStarCode Lesson Plan')
+    doc.moveDown(0.5)
+    doc
+      .fontSize(10)
+      .fillColor('#666666')
+      .text(`Instructor ID: ${instructorId}`)
+      .text(`Lesson Plan ID: ${lessonPlanId}`)
+
+    doc.moveDown()
+    doc.fillColor('#111111')
+    doc.fontSize(12).text(
+      [
+        'Objective: Students will explain variables and write simple JavaScript assignments.',
+        'Opening: Begin with a relatable warm-up that asks students how computers remember information.',
+        'Mini-lesson: Model variable declarations, naming conventions, and string versus number examples.',
+        'Guided practice: Students follow along and predict outputs before running code.',
+        'Independent practice: Students create a small profile card program using at least three variables.',
+        'Assessment: Exit ticket asking students to define a variable and explain when to use one.',
+        'Differentiation: Provide sentence frames, pair programming, and extension prompts for advanced learners.',
+      ].join('\n\n'),
+      { lineGap: 4 }
+    )
+
+    doc.end()
+  })
+}
+
+
 async function getLessonPlanPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
@@ -83,7 +150,40 @@ async function getLessonPlanPdf(params: {
   }
 }
 
-// Uploads generated feedback PDF to supabase storage and adds to client row
+async function getUploadedPdf(params: {
+  supabase: Awaited<ReturnType<typeof createClient>>
+  fileId: string
+}) {
+  const { supabase, fileId } = params
+
+  const { data: fileRow, error } = await supabase
+    .from('files')
+    .select('file_id, user_id, storage_path, original_name, status')
+    .eq('file_id', fileId)
+    .maybeSingle()
+
+  if (error) {
+    throw createHttpError(500, 'Failed to look up file.')
+  }
+
+  if (!fileRow) {
+    throw createHttpError(404, 'File not found.')
+  }
+
+  const { data, error: downloadError } = await supabase.storage
+    .from(UPLOADED_FILES_BUCKET)
+    .download(fileRow.storage_path)
+
+  if (downloadError || !data) {
+    throw createHttpError(404, 'Uploaded file not found.')
+  }
+
+  return {
+    buffer: Buffer.from(await data.arrayBuffer()),
+    fileRow,
+  }
+}
+
 async function storeFeedbackPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
@@ -154,7 +254,11 @@ export async function POST(request: Request) {
       return createErrorResponse(400, 'Request body must be valid JSON.')
     }
 
-    // Input parsing
+    const fileId =
+      typeof body.file_id === 'string' && body.file_id.trim()
+        ? body.file_id.trim()
+        : ''
+
     const instructorId =
       typeof body.instructorId === 'string' ? body.instructorId.trim() : ''
     const lessonPlanId =
@@ -164,14 +268,18 @@ export async function POST(request: Request) {
         ? body.originalFilename.trim()
         : null
 
-    if (!instructorId || !lessonPlanId) {
+    if (!fileId && (!instructorId || !lessonPlanId)) {
       return createErrorResponse(
         400,
-        'Request body must include instructorId and lessonPlanId.'
+        'Request body must include file_id or instructorId and lessonPlanId.'
       )
     }
 
-    if (!isValidUuid(instructorId)) {
+    if (fileId && !isValidUuid(fileId)) {
+      return createErrorResponse(400, 'file_id must be a valid UUID.')
+    }
+
+    if (!fileId && !isValidUuid(instructorId)) {
       return createErrorResponse(400, 'instructorId must be a valid UUID.')
     }
 
@@ -197,6 +305,74 @@ export async function POST(request: Request) {
     }
 
     const isAdmin = isAdminRole(profile.role)
+
+    if (fileId) {
+      const uploaded = await getUploadedPdf({ supabase, fileId })
+
+      const isOwnFile = uploaded.fileRow.user_id === user.id
+
+      if (!isAdmin && !isOwnFile) {
+        return createErrorResponse(403, 'You are not allowed to generate feedback for this file.')
+      }
+
+      if (uploaded.fileRow.status !== 'uploaded') {
+        return createErrorResponse(409, 'File is not ready for processing.')
+      }
+
+      const { error: processingError } = await supabase
+        .from('files')
+        .update({ status: 'processing', status_detail: null })
+        .eq('file_id', fileId)
+
+      if (processingError) {
+        return createErrorResponse(500, 'Failed to mark file as processing.')
+      }
+
+      try {
+        const extractedText = await extractTextFromPdf(uploaded.buffer)
+        const feedback = await getFeedbackFromRag(extractedText)
+        const feedbackPdf = await renderFeedbackPdf({
+          title: 'AllStarCode Lesson Plan Feedback',
+          instructorId: uploaded.fileRow.user_id,
+          lessonPlanId: fileId,
+          feedback,
+        })
+
+        const { feedbackId, storagePath } = await storeFeedbackPdf({
+          supabase,
+          instructorId: uploaded.fileRow.user_id,
+          lessonPlanId: fileId,
+          feedback,
+          pdfBuffer: feedbackPdf,
+          originalFilename: uploaded.fileRow.original_name,
+        })
+
+        await supabase
+          .from('files')
+          .update({ status: 'complete', status_detail: null })
+          .eq('file_id', fileId)
+
+        return jsonResponse(
+          {
+            success: true,
+            feedbackId,
+            storagePath,
+          },
+          200
+        )
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : 'Failed to generate feedback.'
+
+        await supabase
+          .from('files')
+          .update({ status: 'failed', status_detail: message })
+          .eq('file_id', fileId)
+
+        throw error
+      }
+    }
+
     const isOwnInstructorRecord = user.id === instructorId
 
     if (!isAdmin && !isOwnInstructorRecord) {
@@ -247,8 +423,16 @@ export async function POST(request: Request) {
     const message =
       error instanceof Error ? error.message : 'Failed to generate feedback.'
 
+    const status =
+      typeof error === 'object' &&
+      error !== null &&
+      'status' in error &&
+      typeof (error as HttpError).status === 'number'
+        ? (error as HttpError).status!
+        : 500
+
     console.error('Error in POST /api/feedback/generate:', error)
 
-    return createErrorResponse(500, message)
+    return createErrorResponse(status, message)
   }
 }
