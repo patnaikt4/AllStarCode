@@ -29,5 +29,5 @@ export default async function DashboardPage() {
   }
 
   // Default to instructor dashboard
-  redirect('/instructor')
+  redirect('/dashboard/instructor')
 }
