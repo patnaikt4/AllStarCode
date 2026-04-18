@@ -1,6 +1,5 @@
 import { redirect } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
-import InstructorWorkspace from '@/components/instructor/InstructorWorkspace'
 
 export default async function InstructorPage() {
   const supabase = await createClient()
@@ -19,5 +18,5 @@ export default async function InstructorPage() {
 
   if (profile?.role === 'admin') redirect('/admin')
 
-  return <InstructorWorkspace userId={user.id} userEmail={user.email} />
+  redirect('/dashboard/instructor')
 }

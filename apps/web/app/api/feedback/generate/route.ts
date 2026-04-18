@@ -1,16 +1,15 @@
 import { randomUUID } from 'node:crypto'
 
-import PDFDocument from 'pdfkit'
-
 import { getFeedbackStorageBucket } from '@/lib/feedback/feedback-storage-bucket'
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
+
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
 
 export const runtime = 'nodejs'
 
-const LESSON_PLAN_BUCKET = 'lesson-plans'
+const LESSON_PLAN_BUCKET = 'documents'
 const UPLOADED_FILES_BUCKET = 'documents'
 
 type GenerateFeedbackRequest = {
@@ -24,14 +23,17 @@ type HttpError = Error & {
   status?: number
 }
 
+// Guard helper for validating the instructorId coming from the client.
 function isValidUuid(value: string) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
 }
 
+// Standard JSON response helper so success/error payloads stay consistent.
 function jsonResponse(body: Record<string, unknown>, status: number) {
   return Response.json(body, { status })
 }
 
+// Convenience helper for returning typed error JSON to the client.
 function createErrorResponse(status: number, error: string) {
   return jsonResponse(
     {
@@ -42,6 +44,7 @@ function createErrorResponse(status: number, error: string) {
   )
 }
 
+// Narrows profile.role so authorization checks stay type-safe.
 function isAdminRole(role: unknown): role is 'admin' {
   return role === 'admin'
 }
@@ -107,6 +110,7 @@ async function createMockLessonPlanPdf(params: {
   })
 }
 
+
 async function getLessonPlanPdf(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   instructorId: string
@@ -114,39 +118,35 @@ async function getLessonPlanPdf(params: {
 }) {
   const { supabase, instructorId, lessonPlanId } = params
 
-  const candidatePaths = [
-    `${instructorId}/${lessonPlanId}.pdf`,
-    `${lessonPlanId}.pdf`,
-    lessonPlanId,
-  ]
+  const { data: fileRow, error: fileError } = await supabase
+    .from('files')
+    .select('file_id, user_id, storage_path, original_name')
+    .eq('file_id', lessonPlanId)
+    .single()
 
-  for (const storagePath of candidatePaths) {
-    const { data, error } = await supabase.storage
-      .from(LESSON_PLAN_BUCKET)
-      .download(storagePath)
-
-    if (error || !data) {
-      continue
-    }
-
-    const arrayBuffer = await data.arrayBuffer()
-
-    return {
-      buffer: Buffer.from(arrayBuffer),
-      usedPlaceholder: false,
-    }
+  if (fileError || !fileRow) {
+    throw new Error('The selected uploaded file could not be found.')
   }
 
-  console.warn(
-    `Falling back to placeholder lesson plan PDF for lessonPlanId=${lessonPlanId}.`
-  )
+  if (fileRow.user_id !== instructorId) {
+    throw new Error('You are not allowed to generate feedback for this file.')
+  }
+
+  const { data, error } = await supabase.storage
+    .from(LESSON_PLAN_BUCKET)
+    .download(fileRow.storage_path)
+
+  if (error || !data) {
+    throw new Error(
+      `Uploaded lesson plan "${fileRow.original_name}" could not be found in storage.`
+    )
+  }
+
+  const arrayBuffer = await data.arrayBuffer()
 
   return {
-    buffer: await createMockLessonPlanPdf({
-      instructorId,
-      lessonPlanId,
-    }),
-    usedPlaceholder: true,
+    buffer: Buffer.from(arrayBuffer),
+    file: fileRow,
   }
 }
 
@@ -226,12 +226,24 @@ async function storeFeedbackPdf(params: {
     throw new Error(`Failed to save feedback record: ${insertError.message}`)
   }
 
+  const { data: feedbackRow, error: selectError } = await supabase
+    .from('feedback')
+    .select('id')
+    .eq('user_id', instructorId)
+    .eq('storage_path', storagePath)
+    .single()
+
+  if (selectError || !feedbackRow) {
+    throw new Error('Feedback was generated but the saved record could not be loaded.')
+  }
+
   return {
-    feedbackId,
+    feedbackId: feedbackRow.id,
     storagePath,
   }
 }
 
+// Accepts instructorId and lessonPlanId, adds feedback to storage, returns response
 export async function POST(request: Request) {
   try {
     let body: GenerateFeedbackRequest
@@ -271,6 +283,7 @@ export async function POST(request: Request) {
       return createErrorResponse(400, 'instructorId must be a valid UUID.')
     }
 
+    // Verify user has authority to generate feedback
     const supabase = await createClient()
     const {
       data: { user },
@@ -366,21 +379,28 @@ export async function POST(request: Request) {
       return createErrorResponse(403, 'You are not allowed to generate feedback for this instructor.')
     }
 
+    // Load the pdf of the given lesson plan
     const lessonPlanPdf = await getLessonPlanPdf({
       supabase,
       instructorId,
       lessonPlanId,
     })
 
+    // Extract text from it
     const extractedText = await extractTextFromPdf(lessonPlanPdf.buffer)
+
+    // Run text through the rag
     const feedback = await getFeedbackFromRag(extractedText)
+
+    // Turn resulting text back into a pdf
     const feedbackPdf = await renderFeedbackPdf({
       title: 'AllStarCode Lesson Plan Feedback',
       instructorId,
-      lessonPlanId,
+      lessonPlanId: lessonPlanPdf.file.original_name,
       feedback,
     })
 
+    // Store feedback in storage
     const { feedbackId, storagePath } = await storeFeedbackPdf({
       supabase,
       instructorId,
@@ -394,8 +414,8 @@ export async function POST(request: Request) {
       {
         success: true,
         feedbackId,
+        lessonPlanId,
         storagePath,
-        usedPlaceholderLessonPlan: lessonPlanPdf.usedPlaceholder,
       },
       200
     )

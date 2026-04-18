@@ -1,18 +1,12 @@
+console.log("Extract");
 import { PDFParse } from 'pdf-parse'
 
-/*
-Example usage case:
-
-const pdfBuffer = await getLessonPlanFile(lessonPlanId) // Buffer
-const text = await extractTextFromPdf(pdfBuffer)
-*/
-
-// Verify Buffer object is a PDF
 function isPdfBuffer(buffer: Buffer) {
+  console.log("My buffer: ");
+  console.log(buffer);
   return buffer.length >= 4 && buffer.subarray(0, 4).toString('ascii') === '%PDF'
 }
 
-// Parse error message
 function toErrorMessage(error: unknown) {
   if (error instanceof Error && error.message) {
     return error.message
@@ -21,7 +15,6 @@ function toErrorMessage(error: unknown) {
   return 'Unknown PDF parsing error'
 }
 
-// Convert pdf buffer to promise that returns pdf text
 export async function extractTextFromPdf(buffer: Buffer): Promise<string> {
   if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
     throw new Error('Cannot extract text from an empty PDF buffer.')
@@ -35,8 +28,6 @@ export async function extractTextFromPdf(buffer: Buffer): Promise<string> {
 
   try {
     const result = await parser.getText()
-
-    // Clear null characters and trim whitespace
     const text = result.text.replace(/\0/g, '').trim()
 
     if (!text) {
