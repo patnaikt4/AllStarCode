@@ -65,8 +65,10 @@ export default async function InstructorDashboardPage() {
         fileName: file.original_name,
         sourceStoragePath: file.storage_path,
         uploadedAt: file.created_at ?? null,
+        sourceType: 'pdf' as const,
         feedbackStatus: feedback ? ('ready' as const) : ('not_started' as const),
         feedbackId: feedback?.id ?? null,
+        errorMessage: null,
       }
     })
     .sort((a, b) => {
@@ -88,7 +90,7 @@ export default async function InstructorDashboardPage() {
           <p className="dashboard-sidebar-label">Workspace</p>
           <p className="dashboard-sidebar-title">Lesson Feedback Dashboard</p>
           <p className="dashboard-sidebar-copy">
-            Upload lesson plan PDFs, generate coaching feedback, and open completed feedback
+            Upload lesson plan PDFs or lesson videos, generate coaching feedback, and open completed feedback
             files from one place.
           </p>
         </div>
