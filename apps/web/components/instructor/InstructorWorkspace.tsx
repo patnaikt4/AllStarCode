@@ -8,7 +8,7 @@ const LESSON_PLANS_BUCKET = 'lesson-plans'
 const NEW_THREAD_ID = 'new'
 
 const RAG_WELCOME_TEXT =
-  'Upload a lesson plan PDF (optional). Nothing is sent until you click Send. Add notes if you like, then Send to generate curriculum-aligned feedback. If you skip the upload, we use a built-in sample lesson plan.'
+  'Ask a curriculum question, or upload a lesson plan PDF and add notes to generate curriculum-aligned feedback.'
 
 type Thread = {
   id: string
@@ -65,6 +65,16 @@ function formatTime(dateStr: string) {
 function titleFromFilename(filename: string | null | undefined): string {
   if (!filename) return `Lesson · ${formatNow()}`
   return filename.replace(/\.pdf$/i, '')
+}
+
+function titleFromMessage(message: string): string {
+  const normalized = message.replace(/\s+/g, ' ').trim()
+
+  if (!normalized) {
+    return titleFromFilename(null)
+  }
+
+  return normalized.length > 40 ? `${normalized.slice(0, 37)}...` : normalized
 }
 
 function welcomeSession(): RagSession {
@@ -220,6 +230,10 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
   const activeSession = sessions[activeId] ?? welcomeSession()
   const activeThread = threads.find((t) => t.id === activeId)
   const messages = activeSession.messages
+  const generatingLabel =
+    activeSession.lessonPlanId || activeSession.pendingPdfName
+      ? 'Generating feedback...'
+      : 'Thinking...'
 
   const handlePdfPick = () => {
     pdfInputRef.current?.click()
@@ -258,8 +272,16 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
       .upload(path, file, { contentType: 'application/pdf', upsert: true })
 
     if (error) {
+      setSessions((prev) => ({
+        ...prev,
+        [activeId]: {
+          ...(prev[activeId] ?? welcomeSession()),
+          lessonPlanId: null,
+          pendingPdfName: null,
+        },
+      }))
       setUploadError(
-        `Could not upload PDF (${error.message}). You can still send — feedback will use the sample lesson plan.`
+        `Could not upload PDF (${error.message}). Try uploading again, or send a text-only curriculum question.`
       )
     }
   }
@@ -275,13 +297,18 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
     const targetSessionId =
       activeId === NEW_THREAD_ID ? crypto.randomUUID() : activeId
     const note = input.trim()
-    const planId = session.lessonPlanId ?? crypto.randomUUID()
+    const shouldGenerateFeedback = Boolean(
+      session.lessonPlanId || session.pendingPdfName
+    )
+    const planId =
+      session.lessonPlanId ??
+      (shouldGenerateFeedback ? crypto.randomUUID() : null)
 
     const userText = note
       ? note
       : session.pendingPdfName
         ? 'Please review this lesson plan and suggest improvements.'
-        : 'Generate curriculum-aligned feedback for the sample lesson plan.'
+        : 'How can I align my lesson with the AllStarCode curriculum?'
     const userMessage: RagMessage = {
       id: crypto.randomUUID(),
       role: 'user',
@@ -295,7 +322,7 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
     const nextThreadTitle = session.pendingPdfName
       ? titleFromFilename(session.pendingPdfName)
       : currentThreadTitle === 'New lesson'
-        ? titleFromFilename(null)
+        ? titleFromMessage(userText)
         : currentThreadTitle
 
     if (targetSessionId !== activeId) {
@@ -327,7 +354,9 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
       next[targetSessionId] = {
         ...current,
         messages: [...current.messages, userMessage],
-        lessonPlanId: current.lessonPlanId ?? planId,
+        lessonPlanId: shouldGenerateFeedback
+          ? current.lessonPlanId ?? planId
+          : current.lessonPlanId,
       }
 
       return next
@@ -337,16 +366,26 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
     setUploadError(null)
 
     try {
-      const res = await fetch('/api/feedback/generate', {
+      const endpoint = shouldGenerateFeedback
+        ? '/api/feedback/generate'
+        : '/api/chat/message'
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          instructorId: userId,
-          lessonPlanId: planId,
-          originalFilename: session.pendingPdfName,
-          sessionId: targetSessionId,
-          message: userText,
-        }),
+        body: JSON.stringify(
+          shouldGenerateFeedback
+            ? {
+                instructorId: userId,
+                lessonPlanId: planId,
+                originalFilename: session.pendingPdfName,
+                sessionId: targetSessionId,
+                message: userText,
+              }
+            : {
+                sessionId: targetSessionId,
+                message: userText,
+              }
+        ),
       })
 
       const raw = await res.text()
@@ -354,8 +393,9 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
         success?: boolean
         feedbackId?: string
         sessionId?: string
+        assistantMessage?: string
+        message?: string
         error?: string
-        usedPlaceholderLessonPlan?: boolean
       } = {}
 
       if (raw) {
@@ -368,14 +408,21 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
         }
       }
 
-      if (!res.ok || !data.success || !data.feedbackId) {
-        throw new Error(data.error || 'Could not generate feedback.')
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Could not generate a response.')
       }
 
-      let assistantText = 'Your feedback PDF is ready. Open it for the full write-up.'
-      if (data.usedPlaceholderLessonPlan) {
-        assistantText +=
-          ' (No lesson plan file was found in storage for this ID, so the built-in sample was used.)'
+      let assistantText =
+        data.assistantMessage?.trim() ?? data.message?.trim() ?? ''
+
+      if (shouldGenerateFeedback) {
+        if (!data.feedbackId) {
+          throw new Error(data.error || 'Could not generate feedback.')
+        }
+
+        assistantText = 'Your feedback PDF is ready. Open it for the full write-up.'
+      } else if (!assistantText) {
+        throw new Error(data.error || 'Could not generate a chat response.')
       }
 
       setSessions((prev) => {
@@ -391,11 +438,11 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
                 role: 'assistant',
                 text: assistantText,
                 time: formatNow(),
-                feedbackId: data.feedbackId,
+                ...(data.feedbackId ? { feedbackId: data.feedbackId } : {}),
               },
             ],
-            lessonPlanId: null,
-            pendingPdfName: null,
+            lessonPlanId: shouldGenerateFeedback ? null : s.lessonPlanId,
+            pendingPdfName: shouldGenerateFeedback ? null : s.pendingPdfName,
           },
         }
       })
@@ -541,7 +588,7 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
               <div className="msg-avatar assistant">AI</div>
               <div className="msg-content">
                 <div className="msg-bubble" style={{ color: '#6b7280' }}>
-                  Generating feedback…
+                  {generatingLabel}
                 </div>
               </div>
             </div>

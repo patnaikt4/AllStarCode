@@ -362,7 +362,7 @@ async function storeFeedbackPdf(params: {
   }
 }
 
-// Accepts instructorId and lessonPlanId, adds feedback to storage, returns response
+// Generates lesson-plan feedback and records the turn in chat history when sessionId is provided.
 export async function POST(request: Request) {
   try {
     let body: GenerateFeedbackRequest
@@ -413,7 +413,7 @@ export async function POST(request: Request) {
       })
     const chatTitle = createChatTitle({ message: userMessage, originalFilename })
 
-    // Verify user has authority to generate feedback
+    // Verify user has authority to generate feedback.
     const supabase = await createClient()
     const {
       data: { user },
