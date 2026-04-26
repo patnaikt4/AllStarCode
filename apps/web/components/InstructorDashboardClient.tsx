@@ -1,8 +1,8 @@
 'use client'
 
 import Link from 'next/link'
-import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { useRouter } from 'next/navigation'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 
 export type InstructorUploadRow = {
   fileId: string
@@ -35,13 +35,17 @@ type GenerateResponse = {
   error?: string
 }
 
-type UploadResponse = {
+type PdfUploadResponse = {
   success?: boolean
   fileId?: string
   fileName?: string
   storagePath?: string
-  maxDurationSeconds?: number
   error?: string
+}
+
+type VideoUploadResponse = {
+  file_id: string
+  duration_seconds: number
 }
 
 function formatDate(value: string | null) {
@@ -103,6 +107,7 @@ export default function InstructorDashboardClient({
   const router = useRouter()
   const pdfInputRef = useRef<HTMLInputElement>(null)
   const videoInputRef = useRef<HTMLInputElement>(null)
+
   const [rows, setRows] = useState(initialRows)
   const [uploadError, setUploadError] = useState<string | null>(initialLoadError)
   const [generateError, setGenerateError] = useState<string | null>(null)
@@ -138,7 +143,7 @@ export default function InstructorDashboardClient({
         body: formData,
       })
 
-      const payload = await getResponsePayload<UploadResponse>(response)
+      const payload = await getResponsePayload<PdfUploadResponse>(response)
 
       if (
         !response.ok ||
@@ -201,27 +206,30 @@ export default function InstructorDashboardClient({
     try {
       setIsUploading(true)
 
-      const response = await fetch('/api/uploads/video', {
+      const response = await fetch('/api/videos/upload', {
         method: 'POST',
         body: formData,
       })
 
-      const payload = await getResponsePayload<UploadResponse>(response)
+      if (!response.ok) {
+        const text = await response.text()
+        const maxDurationMatch = text.match(/max duration of (\d+) seconds/i)
 
-      if (!response.ok || !payload.fileId || !payload.fileName || !payload.storagePath) {
-        if (payload.maxDurationSeconds) {
-          const minutes = Math.floor(payload.maxDurationSeconds / 60)
+        if (maxDurationMatch) {
+          const seconds = Number.parseInt(maxDurationMatch[1], 10)
+          const minutes = Math.floor(seconds / 60)
           throw new Error(
             `Video exceeds your admin's limit of ${minutes} minute${minutes === 1 ? '' : 's'}.`
           )
         }
 
-        throw new Error(payload.error ?? 'Video upload failed. Please try again.')
+        throw new Error(text || 'Video upload failed. Please try again.')
       }
 
-      const fileId = payload.fileId
-      const fileName = payload.fileName
-      const storagePath = payload.storagePath
+      const payload = (await response.json()) as VideoUploadResponse
+      const fileId = payload.file_id
+      const fileName = file.name
+      const storagePath = `${instructorId}/${fileId}`
 
       setRows((currentRows) => [
         {
@@ -441,7 +449,11 @@ export default function InstructorDashboardClient({
                 const isVideoInProgress =
                   row.sourceType === 'video' &&
                   ['uploaded', 'transcribing', 'generating'].includes(row.feedbackStatus)
-
+                  const hasActiveVideoJob = rows.some(
+                    (r) =>
+                      r.sourceType === 'video' &&
+                      ['uploaded', 'transcribing', 'generating'].includes(r.feedbackStatus)
+                  )
                 return (
                   <tr key={row.fileId}>
                     <td>
@@ -472,9 +484,9 @@ export default function InstructorDashboardClient({
                           type="button"
                           className="dashboard-secondary-button"
                           onClick={() => handleGenerateFeedback(row)}
-                          disabled={isGenerating || isVideoInProgress}
+                          disabled={isGenerating || isVideoInProgress || hasActiveVideoJob}
                         >
-                          {isGenerating || isVideoInProgress
+                          {isGenerating || isVideoInProgress || hasActiveVideoJob
                             ? 'Processing...'
                             : isReady
                               ? 'Regenerate feedback'

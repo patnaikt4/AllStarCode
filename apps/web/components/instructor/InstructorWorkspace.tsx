@@ -8,7 +8,7 @@ const LESSON_PLANS_BUCKET = 'lesson-plans'
 const NEW_THREAD_ID = 'new'
 
 const RAG_WELCOME_TEXT =
-  'Upload a lesson plan PDF (optional). Nothing is sent until you click Send. Add notes if you like, then Send to generate curriculum-aligned feedback. If you skip the upload, we use a built-in sample lesson plan.'
+  'Upload a lesson plan PDF or lesson video (optional). Nothing is sent until you click Send. Add notes if you like, then Send to generate curriculum-aligned feedback. If you skip the upload, we use a built-in sample lesson plan.'
 
 type Thread = {
   id: string

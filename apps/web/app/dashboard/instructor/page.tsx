@@ -6,6 +6,42 @@ import InstructorDashboardClient, {
 } from '@/components/InstructorDashboardClient'
 import { createClient } from '@/lib/supabase/server'
 
+function inferSourceType(filename: string | null | undefined): 'pdf' | 'video' {
+  if (!filename) return 'pdf'
+
+  const lower = filename.toLowerCase()
+  if (
+    lower.endsWith('.mp4') ||
+    lower.endsWith('.mov') ||
+    lower.endsWith('.webm') ||
+    lower.endsWith('.m4v')
+  ) {
+    return 'video'
+  }
+
+  return 'pdf'
+}
+
+function mapFeedbackStatus(
+  status: string | null | undefined
+): InstructorUploadRow['feedbackStatus'] {
+  switch (status) {
+    case 'uploaded':
+      return 'uploaded'
+    case 'transcribing':
+      return 'transcribing'
+    case 'generating':
+      return 'generating'
+    case 'failed':
+      return 'failed'
+    case 'ready':
+    case 'complete':
+      return 'ready'
+    default:
+      return 'not_started'
+  }
+}
+
 export default async function InstructorDashboardPage() {
   const supabase = await createClient()
   const {
@@ -35,30 +71,18 @@ export default async function InstructorDashboardPage() {
         .order('created_at', { ascending: false }),
       supabase
         .from('feedback')
-        .select('id, storage_path, created_at')
+        .select('id, lesson_plan_id, storage_path, original_filename, status, created_at')
         .eq('user_id', user.id)
         .order('created_at', { ascending: false }),
     ])
 
   const loadError = filesError?.message ?? feedbackError?.message ?? null
 
-  const latestFeedbackByFileId = new Map<string, { id: number; created_at: string }>()
-
-  for (const row of feedbackRows ?? []) {
-    const pathParts = row.storage_path?.split('/') ?? []
-    const sourceFileId = pathParts.length >= 2 ? pathParts[1] : null
-
-    if (sourceFileId && !latestFeedbackByFileId.has(sourceFileId)) {
-      latestFeedbackByFileId.set(sourceFileId, {
-        id: row.id,
-        created_at: row.created_at,
-      })
-    }
-  }
-
-  const uploadRows: InstructorUploadRow[] = (files ?? [])
-    .map((file) => {
-      const feedback = latestFeedbackByFileId.get(file.file_id)
+  const uploadRows: InstructorUploadRow[] = [
+    ...(files ?? []).map((file) => {
+      const matchingFeedback = (feedbackRows ?? []).find(
+        (row) => row.lesson_plan_id === file.file_id
+      )
 
       return {
         fileId: file.file_id,
@@ -66,17 +90,31 @@ export default async function InstructorDashboardPage() {
         sourceStoragePath: file.storage_path,
         uploadedAt: file.created_at ?? null,
         sourceType: 'pdf' as const,
-        feedbackStatus: feedback ? ('ready' as const) : ('not_started' as const),
-        feedbackId: feedback?.id ?? null,
+        feedbackStatus: matchingFeedback
+          ? mapFeedbackStatus(matchingFeedback.status)
+          : ('not_started' as const),
+        feedbackId: matchingFeedback?.id ?? null,
         errorMessage: null,
       }
-    })
-    .sort((a, b) => {
-      const left = a.uploadedAt ? new Date(a.uploadedAt).getTime() : 0
-      const right = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0
+    }),
 
-      return right - left
-    })
+    ...(feedbackRows ?? [])
+      .filter((row) => inferSourceType(row.original_filename) === 'video')
+      .map((row) => ({
+        fileId: row.lesson_plan_id,
+        fileName: row.original_filename ?? 'Uploaded video',
+        sourceStoragePath: row.storage_path ?? '',
+        uploadedAt: row.created_at ?? null,
+        sourceType: 'video' as const,
+        feedbackStatus: mapFeedbackStatus(row.status),
+        feedbackId: row.id ?? null,
+        errorMessage: null,
+      })),
+  ].sort((a, b) => {
+    const left = a.uploadedAt ? new Date(a.uploadedAt).getTime() : 0
+    const right = b.uploadedAt ? new Date(b.uploadedAt).getTime() : 0
+    return right - left
+  })
 
   return (
     <div className="instructor-dashboard-page">
@@ -90,8 +128,8 @@ export default async function InstructorDashboardPage() {
           <p className="dashboard-sidebar-label">Workspace</p>
           <p className="dashboard-sidebar-title">Lesson Feedback Dashboard</p>
           <p className="dashboard-sidebar-copy">
-            Upload lesson plan PDFs or lesson videos, generate coaching feedback, and open completed feedback
-            files from one place.
+            Upload lesson plan PDFs or lesson videos, generate coaching feedback, and open
+            completed feedback files from one place.
           </p>
         </div>
 
