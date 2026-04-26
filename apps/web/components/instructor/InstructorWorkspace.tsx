@@ -32,6 +32,22 @@ type RagSession = {
   pendingPdfName: string | null
 }
 
+type ChatSessionRow = {
+  id: string
+  title: string | null
+  created_at: string | null
+  updated_at: string | null
+}
+
+type ChatMessageRow = {
+  id: string
+  session_id: string
+  role: string
+  content: string
+  created_at: string | null
+  feedback_id: string | null
+}
+
 function formatNow() {
   return new Date().toLocaleTimeString(undefined, {
     hour: 'numeric',
@@ -86,9 +102,69 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
   const [generating, setGenerating] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
 
-  // Load feedback history from Supabase on mount
+  // Load chat history from Supabase on mount, with old feedback rows as fallback.
   useEffect(() => {
     async function loadHistory() {
+      const { data: chatSessionRows, error: chatSessionError } = await supabase
+        .from('chat_sessions')
+        .select('id, title, created_at, updated_at')
+        .eq('user_id', userId)
+        .order('updated_at', { ascending: false })
+        .limit(30)
+
+      if (!chatSessionError && chatSessionRows && chatSessionRows.length > 0) {
+        const chatSessions = chatSessionRows as ChatSessionRow[]
+        const sessionIds = chatSessions.map((row) => row.id)
+        const { data: chatMessageRows } = await supabase
+          .from('chat_messages')
+          .select('id, session_id, role, content, created_at, feedback_id')
+          .in('session_id', sessionIds)
+          .order('created_at', { ascending: true })
+
+        const messagesBySession = new Map<string, ChatMessageRow[]>()
+
+        for (const row of (chatMessageRows ?? []) as ChatMessageRow[]) {
+          const rows = messagesBySession.get(row.session_id) ?? []
+          rows.push(row)
+          messagesBySession.set(row.session_id, rows)
+        }
+
+        const historyThreads: Thread[] = chatSessions.map((row) => ({
+          id: row.id,
+          title:
+            row.title ||
+            `Lesson · ${formatTime(row.updated_at ?? row.created_at ?? new Date().toISOString())}`,
+        }))
+
+        const historySessions: Record<string, RagSession> = {}
+
+        for (const row of chatSessions) {
+          const chatMessages = messagesBySession.get(row.id) ?? []
+          historySessions[row.id] = {
+            messages:
+              chatMessages.length > 0
+                ? chatMessages.map((message) => ({
+                    id: message.id,
+                    role: message.role === 'user' ? 'user' : 'assistant',
+                    text: message.content,
+                    time: message.created_at ? formatTime(message.created_at) : formatNow(),
+                    ...(message.feedback_id ? { feedbackId: message.feedback_id } : {}),
+                  }))
+                : welcomeSession().messages,
+            lessonPlanId: null,
+            pendingPdfName: null,
+          }
+        }
+
+        setThreads((prev) => {
+          const existingIds = new Set(prev.map((t) => t.id))
+          const deduped = historyThreads.filter((t) => !existingIds.has(t.id))
+          return [...deduped, ...prev]
+        })
+        setSessions((prev) => ({ ...historySessions, ...prev }))
+        return
+      }
+
       const { data } = await supabase
         .from('feedback')
         .select('id, original_filename, created_at')
@@ -196,6 +272,8 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
 
   const handleSend = useCallback(async () => {
     const session = sessions[activeId] ?? welcomeSession()
+    const targetSessionId =
+      activeId === NEW_THREAD_ID ? crypto.randomUUID() : activeId
     const note = input.trim()
     const planId = session.lessonPlanId ?? crypto.randomUUID()
 
@@ -204,26 +282,56 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
       : session.pendingPdfName
         ? 'Please review this lesson plan and suggest improvements.'
         : 'Generate curriculum-aligned feedback for the sample lesson plan.'
+    const userMessage: RagMessage = {
+      id: crypto.randomUUID(),
+      role: 'user',
+      text: userText,
+      time: formatNow(),
+      ...(session.pendingPdfName
+        ? { fileName: session.pendingPdfName, fileKind: 'pdf' as const }
+        : {}),
+    }
+    const currentThreadTitle = activeThread?.title ?? 'New lesson'
+    const nextThreadTitle = session.pendingPdfName
+      ? titleFromFilename(session.pendingPdfName)
+      : currentThreadTitle === 'New lesson'
+        ? titleFromFilename(null)
+        : currentThreadTitle
 
-    setSessions((prev) => ({
-      ...prev,
-      [activeId]: {
-        ...(prev[activeId] ?? welcomeSession()),
-        messages: [
-          ...(prev[activeId]?.messages ?? welcomeSession().messages),
-          {
-            id: crypto.randomUUID(),
-            role: 'user',
-            text: userText,
-            time: formatNow(),
-            ...(session.pendingPdfName
-              ? { fileName: session.pendingPdfName, fileKind: 'pdf' as const }
-              : {}),
-          },
-        ],
-        lessonPlanId: session.lessonPlanId ?? planId,
-      },
-    }))
+    if (targetSessionId !== activeId) {
+      setActiveId(targetSessionId)
+    }
+
+    setThreads((prev) => {
+      const nextThreads = prev.map((thread) =>
+        thread.id === activeId
+          ? { id: targetSessionId, title: nextThreadTitle }
+          : thread
+      )
+
+      if (nextThreads.some((thread) => thread.id === targetSessionId)) {
+        return nextThreads
+      }
+
+      return [...nextThreads, { id: targetSessionId, title: nextThreadTitle }]
+    })
+
+    setSessions((prev) => {
+      const current = prev[activeId] ?? welcomeSession()
+      const next = { ...prev }
+
+      if (targetSessionId !== activeId) {
+        delete next[activeId]
+      }
+
+      next[targetSessionId] = {
+        ...current,
+        messages: [...current.messages, userMessage],
+        lessonPlanId: current.lessonPlanId ?? planId,
+      }
+
+      return next
+    })
     setInput('')
     setGenerating(true)
     setUploadError(null)
@@ -232,13 +340,20 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
       const res = await fetch('/api/feedback/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ instructorId: userId, lessonPlanId: planId, originalFilename: session.pendingPdfName }),
+        body: JSON.stringify({
+          instructorId: userId,
+          lessonPlanId: planId,
+          originalFilename: session.pendingPdfName,
+          sessionId: targetSessionId,
+          message: userText,
+        }),
       })
 
       const raw = await res.text()
       let data: {
         success?: boolean
         feedbackId?: string
+        sessionId?: string
         error?: string
         usedPlaceholderLessonPlan?: boolean
       } = {}
@@ -264,10 +379,10 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
       }
 
       setSessions((prev) => {
-        const s = prev[activeId] ?? welcomeSession()
+        const s = prev[targetSessionId] ?? welcomeSession()
         return {
           ...prev,
-          [activeId]: {
+          [targetSessionId]: {
             ...s,
             messages: [
               ...s.messages,
@@ -287,10 +402,10 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Something went wrong.'
       setSessions((prev) => {
-        const s = prev[activeId] ?? welcomeSession()
+        const s = prev[targetSessionId] ?? welcomeSession()
         return {
           ...prev,
-          [activeId]: {
+          [targetSessionId]: {
             ...s,
             messages: [
               ...s.messages,
@@ -308,7 +423,7 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
     } finally {
       setGenerating(false)
     }
-  }, [activeId, input, sessions, userId])
+  }, [activeId, activeThread?.title, input, sessions, userId])
 
   const handleNewThread = useCallback(() => {
     const id = crypto.randomUUID()

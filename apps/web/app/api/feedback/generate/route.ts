@@ -6,7 +6,7 @@ import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
 
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
-
+import PDFDocument from 'pdfkit'
 export const runtime = 'nodejs'
 
 const LESSON_PLAN_BUCKET = 'documents'
@@ -17,11 +17,15 @@ type GenerateFeedbackRequest = {
   lessonPlanId?: unknown
   originalFilename?: unknown
   file_id?: unknown
+  sessionId?: unknown
+  message?: unknown
 }
 
 type HttpError = Error & {
   status?: number
 }
+
+type ChatMessageRole = 'user' | 'assistant'
 
 // Guard helper for validating the instructorId coming from the client.
 function isValidUuid(value: string) {
@@ -53,6 +57,121 @@ function createHttpError(status: number, message: string) {
   const error = new Error(message) as HttpError
   error.status = status
   return error
+}
+
+function getOptionalTrimmedString(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+function createChatTitle(params: {
+  message: string
+  originalFilename: string | null
+}) {
+  const { message, originalFilename } = params
+
+  if (originalFilename) {
+    return originalFilename.replace(/\.pdf$/i, '')
+  }
+
+  const normalized = message.replace(/\s+/g, ' ').trim()
+
+  if (!normalized) {
+    return null
+  }
+
+  return normalized.length > 80 ? `${normalized.slice(0, 77)}...` : normalized
+}
+
+function createDefaultUserMessage(params: {
+  originalFilename: string | null
+  usesUploadedFile: boolean
+}) {
+  const { originalFilename, usesUploadedFile } = params
+
+  if (originalFilename) {
+    return `Please review ${originalFilename} and suggest improvements.`
+  }
+
+  if (usesUploadedFile) {
+    return 'Please review this lesson plan and suggest improvements.'
+  }
+
+  return 'Generate curriculum-aligned feedback for the sample lesson plan.'
+}
+
+async function ensureChatSession(params: {
+  supabase: Awaited<ReturnType<typeof createClient>>
+  userId: string
+  sessionId: string | null
+  title: string | null
+}) {
+  const { supabase, userId, sessionId, title } = params
+  const resolvedSessionId = sessionId ?? randomUUID()
+
+  const { error: upsertError } = await supabase
+    .from('chat_sessions')
+    .upsert(
+      {
+        id: resolvedSessionId,
+        user_id: userId,
+        title,
+      },
+      {
+        onConflict: 'id',
+        ignoreDuplicates: true,
+      }
+    )
+
+  if (upsertError) {
+    throw createHttpError(
+      500,
+      `Failed to save chat session: ${upsertError.message}`
+    )
+  }
+
+  const { data: chatSession, error: selectError } = await supabase
+    .from('chat_sessions')
+    .select('id')
+    .eq('id', resolvedSessionId)
+    .eq('user_id', userId)
+    .maybeSingle()
+
+  if (selectError) {
+    throw createHttpError(
+      500,
+      `Failed to load chat session: ${selectError.message}`
+    )
+  }
+
+  if (!chatSession) {
+    throw createHttpError(403, 'Chat session not found or access denied.')
+  }
+
+  return resolvedSessionId
+}
+
+async function insertChatMessage(params: {
+  supabase: Awaited<ReturnType<typeof createClient>>
+  sessionId: string
+  role: ChatMessageRole
+  content: string
+  feedbackId?: string
+}) {
+  const { supabase, sessionId, role, content, feedbackId } = params
+
+  const { error } = await supabase.from('chat_messages').insert({
+    session_id: sessionId,
+    role,
+    content,
+    ...(feedbackId ? { feedback_id: feedbackId } : {}),
+  })
+
+  if (error) {
+    throw createHttpError(
+      500,
+      `Failed to save chat message: ${error.message}`
+    )
+  }
 }
 
 async function createMockLessonPlanPdf(params: {
@@ -263,10 +382,9 @@ export async function POST(request: Request) {
       typeof body.instructorId === 'string' ? body.instructorId.trim() : ''
     const lessonPlanId =
       typeof body.lessonPlanId === 'string' ? body.lessonPlanId.trim() : ''
-    const originalFilename =
-      typeof body.originalFilename === 'string' && body.originalFilename.trim()
-        ? body.originalFilename.trim()
-        : null
+    const originalFilename = getOptionalTrimmedString(body.originalFilename)
+    const requestedSessionId = getOptionalTrimmedString(body.sessionId)
+    const requestMessage = getOptionalTrimmedString(body.message)
 
     if (!fileId && (!instructorId || !lessonPlanId)) {
       return createErrorResponse(
@@ -282,6 +400,18 @@ export async function POST(request: Request) {
     if (!fileId && !isValidUuid(instructorId)) {
       return createErrorResponse(400, 'instructorId must be a valid UUID.')
     }
+
+    if (requestedSessionId && !isValidUuid(requestedSessionId)) {
+      return createErrorResponse(400, 'sessionId must be a valid UUID.')
+    }
+
+    const userMessage =
+      requestMessage ??
+      createDefaultUserMessage({
+        originalFilename,
+        usesUploadedFile: Boolean(fileId || lessonPlanId),
+      })
+    const chatTitle = createChatTitle({ message: userMessage, originalFilename })
 
     // Verify user has authority to generate feedback
     const supabase = await createClient()
@@ -319,6 +449,20 @@ export async function POST(request: Request) {
         return createErrorResponse(409, 'File is not ready for processing.')
       }
 
+      const chatSessionId = await ensureChatSession({
+        supabase,
+        userId: user.id,
+        sessionId: requestedSessionId,
+        title: chatTitle,
+      })
+
+      await insertChatMessage({
+        supabase,
+        sessionId: chatSessionId,
+        role: 'user',
+        content: userMessage,
+      })
+
       const { error: processingError } = await supabase
         .from('files')
         .update({ status: 'processing', status_detail: null })
@@ -347,6 +491,16 @@ export async function POST(request: Request) {
           originalFilename: uploaded.fileRow.original_name,
         })
 
+        const assistantMessage = 'Your feedback PDF is ready. Open it for the full write-up.'
+
+        await insertChatMessage({
+          supabase,
+          sessionId: chatSessionId,
+          role: 'assistant',
+          content: assistantMessage,
+          feedbackId,
+        })
+
         await supabase
           .from('files')
           .update({ status: 'complete', status_detail: null })
@@ -356,6 +510,7 @@ export async function POST(request: Request) {
           {
             success: true,
             feedbackId,
+            sessionId: chatSessionId,
             storagePath,
           },
           200
@@ -378,6 +533,20 @@ export async function POST(request: Request) {
     if (!isAdmin && !isOwnInstructorRecord) {
       return createErrorResponse(403, 'You are not allowed to generate feedback for this instructor.')
     }
+
+    const chatSessionId = await ensureChatSession({
+      supabase,
+      userId: user.id,
+      sessionId: requestedSessionId,
+      title: chatTitle,
+    })
+
+    await insertChatMessage({
+      supabase,
+      sessionId: chatSessionId,
+      role: 'user',
+      content: userMessage,
+    })
 
     // Load the pdf of the given lesson plan
     const lessonPlanPdf = await getLessonPlanPdf({
@@ -410,11 +579,22 @@ export async function POST(request: Request) {
       originalFilename,
     })
 
+    const assistantMessage = 'Your feedback PDF is ready. Open it for the full write-up.'
+
+    await insertChatMessage({
+      supabase,
+      sessionId: chatSessionId,
+      role: 'assistant',
+      content: assistantMessage,
+      feedbackId,
+    })
+
     return jsonResponse(
       {
         success: true,
         feedbackId,
         lessonPlanId,
+        sessionId: chatSessionId,
         storagePath,
       },
       200
