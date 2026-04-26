@@ -111,7 +111,8 @@ export default function InstructorDashboardClient({
   const [rows, setRows] = useState(initialRows)
   const [uploadError, setUploadError] = useState<string | null>(initialLoadError)
   const [generateError, setGenerateError] = useState<string | null>(null)
-  const [isUploading, setIsUploading] = useState(false)
+  const [isUploadingPdf, setIsUploadingPdf] = useState(false)
+  const [isUploadingVideo, setIsUploadingVideo] = useState(false)
   const [generatingLessonPlanId, setGeneratingLessonPlanId] = useState<string | null>(null)
 
   const readyCount = rows.filter((row) => row.feedbackStatus === 'ready').length
@@ -136,7 +137,7 @@ export default function InstructorDashboardClient({
     formData.append('file', file)
 
     try {
-      setIsUploading(true)
+      setIsUploadingPdf(true)
 
       const response = await fetch('/api/lesson-plans/upload', {
         method: 'POST',
@@ -179,7 +180,7 @@ export default function InstructorDashboardClient({
         getErrorMessage(error, 'The lesson plan could not be uploaded. Please try again.')
       )
     } finally {
-      setIsUploading(false)
+      setIsUploadingPdf(false)
       event.target.value = ''
     }
   }
@@ -204,7 +205,7 @@ export default function InstructorDashboardClient({
     formData.append('file', file)
 
     try {
-      setIsUploading(true)
+      setIsUploadingVideo(true)
 
       const response = await fetch('/api/videos/upload', {
         method: 'POST',
@@ -251,7 +252,7 @@ export default function InstructorDashboardClient({
         getErrorMessage(error, 'The video could not be uploaded. Please try again.')
       )
     } finally {
-      setIsUploading(false)
+      setIsUploadingVideo(false)
       event.target.value = ''
     }
   }
@@ -391,7 +392,7 @@ export default function InstructorDashboardClient({
             type="file"
             accept="application/pdf"
             onChange={handlePdfUpload}
-            disabled={isUploading}
+            disabled={isUploadingPdf}
           />
           <input
             ref={videoInputRef}
@@ -399,23 +400,23 @@ export default function InstructorDashboardClient({
             type="file"
             accept="video/*"
             onChange={handleVideoUpload}
-            disabled={isUploading}
+            disabled={isUploadingVideo}
           />
           <button
             type="button"
             className="dashboard-primary-button"
             onClick={() => videoInputRef.current?.click()}
-            disabled={isUploading}
+            disabled={isUploadingVideo}
           >
-            {isUploading ? 'Uploading...' : 'Upload lesson video'}
+            {isUploadingVideo ? 'Uploading...' : 'Upload lesson video'}
           </button>
           <button
             type="button"
             className="dashboard-primary-button"
             onClick={() => pdfInputRef.current?.click()}
-            disabled={isUploading}
+            disabled={isUploadingPdf}
           >
-            {isUploading ? 'Uploading PDF...' : 'Upload lesson plan PDF'}
+            {isUploadingPdf ? 'Uploading PDF...' : 'Upload lesson plan PDF'}
           </button>
         </div>
       </div>
