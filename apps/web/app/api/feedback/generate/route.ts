@@ -102,17 +102,16 @@ function createDefaultUserMessage(params: {
 async function ensureChatSession(params: {
   supabase: Awaited<ReturnType<typeof createClient>>
   userId: string
-  sessionId: string | null
+  sessionId: string
   title: string | null
 }) {
   const { supabase, userId, sessionId, title } = params
-  const resolvedSessionId = sessionId ?? randomUUID()
 
   const { error: upsertError } = await supabase
     .from('chat_sessions')
     .upsert(
       {
-        id: resolvedSessionId,
+        id: sessionId,
         user_id: userId,
         title,
       },
@@ -132,7 +131,7 @@ async function ensureChatSession(params: {
   const { data: chatSession, error: selectError } = await supabase
     .from('chat_sessions')
     .select('id')
-    .eq('id', resolvedSessionId)
+    .eq('id', sessionId)
     .eq('user_id', userId)
     .maybeSingle()
 
@@ -147,7 +146,7 @@ async function ensureChatSession(params: {
     throw createHttpError(403, 'Chat session not found or access denied.')
   }
 
-  return resolvedSessionId
+  return sessionId
 }
 
 async function insertChatMessage(params: {
@@ -449,19 +448,23 @@ export async function POST(request: Request) {
         return createErrorResponse(409, 'File is not ready for processing.')
       }
 
-      const chatSessionId = await ensureChatSession({
-        supabase,
-        userId: user.id,
-        sessionId: requestedSessionId,
-        title: chatTitle,
-      })
+      let chatSessionId: string | null = null
 
-      await insertChatMessage({
-        supabase,
-        sessionId: chatSessionId,
-        role: 'user',
-        content: userMessage,
-      })
+      if (requestedSessionId) {
+        chatSessionId = await ensureChatSession({
+          supabase,
+          userId: user.id,
+          sessionId: requestedSessionId,
+          title: chatTitle,
+        })
+
+        await insertChatMessage({
+          supabase,
+          sessionId: chatSessionId,
+          role: 'user',
+          content: userMessage,
+        })
+      }
 
       const { error: processingError } = await supabase
         .from('files')
@@ -493,13 +496,15 @@ export async function POST(request: Request) {
 
         const assistantMessage = 'Your feedback PDF is ready. Open it for the full write-up.'
 
-        await insertChatMessage({
-          supabase,
-          sessionId: chatSessionId,
-          role: 'assistant',
-          content: assistantMessage,
-          feedbackId,
-        })
+        if (chatSessionId) {
+          await insertChatMessage({
+            supabase,
+            sessionId: chatSessionId,
+            role: 'assistant',
+            content: assistantMessage,
+            feedbackId,
+          })
+        }
 
         await supabase
           .from('files')
@@ -510,7 +515,7 @@ export async function POST(request: Request) {
           {
             success: true,
             feedbackId,
-            sessionId: chatSessionId,
+            ...(chatSessionId ? { sessionId: chatSessionId } : {}),
             storagePath,
           },
           200
@@ -534,19 +539,23 @@ export async function POST(request: Request) {
       return createErrorResponse(403, 'You are not allowed to generate feedback for this instructor.')
     }
 
-    const chatSessionId = await ensureChatSession({
-      supabase,
-      userId: user.id,
-      sessionId: requestedSessionId,
-      title: chatTitle,
-    })
+    let chatSessionId: string | null = null
 
-    await insertChatMessage({
-      supabase,
-      sessionId: chatSessionId,
-      role: 'user',
-      content: userMessage,
-    })
+    if (requestedSessionId) {
+      chatSessionId = await ensureChatSession({
+        supabase,
+        userId: user.id,
+        sessionId: requestedSessionId,
+        title: chatTitle,
+      })
+
+      await insertChatMessage({
+        supabase,
+        sessionId: chatSessionId,
+        role: 'user',
+        content: userMessage,
+      })
+    }
 
     // Load the pdf of the given lesson plan
     const lessonPlanPdf = await getLessonPlanPdf({
@@ -581,20 +590,22 @@ export async function POST(request: Request) {
 
     const assistantMessage = 'Your feedback PDF is ready. Open it for the full write-up.'
 
-    await insertChatMessage({
-      supabase,
-      sessionId: chatSessionId,
-      role: 'assistant',
-      content: assistantMessage,
-      feedbackId,
-    })
+    if (chatSessionId) {
+      await insertChatMessage({
+        supabase,
+        sessionId: chatSessionId,
+        role: 'assistant',
+        content: assistantMessage,
+        feedbackId,
+      })
+    }
 
     return jsonResponse(
       {
         success: true,
         feedbackId,
         lessonPlanId,
-        sessionId: chatSessionId,
+        ...(chatSessionId ? { sessionId: chatSessionId } : {}),
         storagePath,
       },
       200
