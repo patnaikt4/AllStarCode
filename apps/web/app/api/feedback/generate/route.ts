@@ -6,7 +6,7 @@ import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
 
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
-
+import PDFDocument from "pdfkit"
 export const runtime = 'nodejs'
 
 const LESSON_PLAN_BUCKET = 'documents'

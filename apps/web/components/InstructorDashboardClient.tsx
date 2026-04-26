@@ -2,15 +2,23 @@
 
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { useRef, useState, type ChangeEvent } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 
 export type InstructorUploadRow = {
   fileId: string
   fileName: string
   sourceStoragePath: string
   uploadedAt: string | null
-  feedbackStatus: 'ready' | 'not_started'
+  sourceType: 'pdf' | 'video'
+  feedbackStatus:
+    | 'ready'
+    | 'not_started'
+    | 'uploaded'
+    | 'transcribing'
+    | 'generating'
+    | 'failed'
   feedbackId: number | null
+  errorMessage?: string | null
 }
 
 type Props = {
@@ -23,15 +31,21 @@ type GenerateResponse = {
   success?: boolean
   feedbackId?: number
   fileId?: string
+  status?: 'uploaded' | 'transcribing' | 'generating' | 'complete' | 'failed'
   error?: string
 }
 
-type UploadResponse = {
+type PdfUploadResponse = {
   success?: boolean
   fileId?: string
   fileName?: string
   storagePath?: string
   error?: string
+}
+
+type VideoUploadResponse = {
+  file_id: string
+  duration_seconds: number
 }
 
 function formatDate(value: string | null) {
@@ -53,6 +67,27 @@ function getErrorMessage(error: unknown, fallback: string) {
   return fallback
 }
 
+function getStatusLabel(row: InstructorUploadRow, isGenerating: boolean) {
+  if (isGenerating && row.sourceType === 'pdf') {
+    return 'Generating feedback...'
+  }
+
+  switch (row.feedbackStatus) {
+    case 'uploaded':
+      return 'Uploaded...'
+    case 'transcribing':
+      return 'Transcribing audio...'
+    case 'generating':
+      return 'Generating feedback...'
+    case 'ready':
+      return 'Feedback ready'
+    case 'failed':
+      return 'Processing failed'
+    default:
+      return 'Feedback not generated'
+  }
+}
+
 async function getResponsePayload<T>(response: Response): Promise<T> {
   const contentType = response.headers.get('content-type') ?? ''
 
@@ -70,16 +105,19 @@ export default function InstructorDashboardClient({
   initialLoadError,
 }: Props) {
   const router = useRouter()
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const pdfInputRef = useRef<HTMLInputElement>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
+
   const [rows, setRows] = useState(initialRows)
   const [uploadError, setUploadError] = useState<string | null>(initialLoadError)
   const [generateError, setGenerateError] = useState<string | null>(null)
-  const [isUploading, setIsUploading] = useState(false)
+  const [isUploadingPdf, setIsUploadingPdf] = useState(false)
+  const [isUploadingVideo, setIsUploadingVideo] = useState(false)
   const [generatingLessonPlanId, setGeneratingLessonPlanId] = useState<string | null>(null)
 
   const readyCount = rows.filter((row) => row.feedbackStatus === 'ready').length
 
-  async function handleUpload(event: ChangeEvent<HTMLInputElement>) {
+  async function handlePdfUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0]
 
     if (!file) {
@@ -99,14 +137,14 @@ export default function InstructorDashboardClient({
     formData.append('file', file)
 
     try {
-      setIsUploading(true)
+      setIsUploadingPdf(true)
 
       const response = await fetch('/api/lesson-plans/upload', {
         method: 'POST',
         body: formData,
       })
 
-      const payload = await getResponsePayload<UploadResponse>(response)
+      const payload = await getResponsePayload<PdfUploadResponse>(response)
 
       if (
         !response.ok ||
@@ -128,8 +166,10 @@ export default function InstructorDashboardClient({
           fileName,
           sourceStoragePath: storagePath,
           uploadedAt: new Date().toISOString(),
+          sourceType: 'pdf',
           feedbackStatus: 'not_started',
           feedbackId: null,
+          errorMessage: null,
         },
         ...currentRows,
       ])
@@ -140,28 +180,110 @@ export default function InstructorDashboardClient({
         getErrorMessage(error, 'The lesson plan could not be uploaded. Please try again.')
       )
     } finally {
-      setIsUploading(false)
+      setIsUploadingPdf(false)
       event.target.value = ''
     }
   }
 
-  async function handleGenerateFeedback(fileId: string, fileName: string) {
+  async function handleVideoUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+
+    if (!file) {
+      return
+    }
+
+    setUploadError(null)
+    setGenerateError(null)
+
+    if (!file.type.startsWith('video/')) {
+      setUploadError('Please choose a video file.')
+      event.target.value = ''
+      return
+    }
+
+    const formData = new FormData()
+    formData.append('file', file)
+
+    try {
+      setIsUploadingVideo(true)
+
+      const response = await fetch('/api/videos/upload', {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!response.ok) {
+        const text = await response.text()
+        const maxDurationMatch = text.match(/max duration of (\d+) seconds/i)
+
+        if (maxDurationMatch) {
+          const seconds = Number.parseInt(maxDurationMatch[1], 10)
+          const minutes = Math.floor(seconds / 60)
+          throw new Error(
+            `Video exceeds your admin's limit of ${minutes} minute${minutes === 1 ? '' : 's'}.`
+          )
+        }
+
+        throw new Error(text || 'Video upload failed. Please try again.')
+      }
+
+      const payload = (await response.json()) as VideoUploadResponse
+      const fileId = payload.file_id
+      const fileName = file.name
+      const storagePath = `${instructorId}/${fileId}`
+
+      setRows((currentRows) => [
+        {
+          fileId,
+          fileName,
+          sourceStoragePath: storagePath,
+          uploadedAt: new Date().toISOString(),
+          sourceType: 'video',
+          feedbackStatus: 'not_started',
+          feedbackId: null,
+          errorMessage: null,
+        },
+        ...currentRows,
+      ])
+
+      router.refresh()
+    } catch (error) {
+      setUploadError(
+        getErrorMessage(error, 'The video could not be uploaded. Please try again.')
+      )
+    } finally {
+      setIsUploadingVideo(false)
+      event.target.value = ''
+    }
+  }
+
+  async function handleGenerateFeedback(row: InstructorUploadRow) {
     setGenerateError(null)
     setUploadError(null)
 
     try {
-      setGeneratingLessonPlanId(fileId)
+      setGeneratingLessonPlanId(row.fileId)
+
+      const requestBody =
+        row.sourceType === 'video'
+          ? {
+              instructorId,
+              lessonPlanId: row.fileId,
+              source_type: 'video',
+              videoFileId: row.fileId,
+            }
+          : {
+              instructorId,
+              lessonPlanId: row.fileId,
+              originalFilename: row.fileName,
+            }
 
       const response = await fetch('/api/feedback/generate', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          instructorId,
-          lessonPlanId: fileId,
-          originalFilename: fileName,
-        }),
+        body: JSON.stringify(requestBody),
       })
 
       const payload = await getResponsePayload<GenerateResponse>(response)
@@ -171,14 +293,20 @@ export default function InstructorDashboardClient({
       }
 
       setRows((currentRows) =>
-        currentRows.map((row) =>
-          row.fileId === fileId
+        currentRows.map((currentRow) =>
+          currentRow.fileId === row.fileId
             ? {
-                ...row,
-                feedbackStatus: 'ready',
+                ...currentRow,
                 feedbackId: payload.feedbackId!,
+                feedbackStatus:
+                  row.sourceType === 'video'
+                    ? payload.status === 'complete'
+                      ? 'ready'
+                      : (payload.status ?? 'uploaded')
+                    : 'ready',
+                errorMessage: null,
               }
-            : row
+            : currentRow
         )
       )
 
@@ -192,6 +320,59 @@ export default function InstructorDashboardClient({
     }
   }
 
+  useEffect(() => {
+    const hasActiveVideoJob = rows.some(
+      (row) =>
+        row.sourceType === 'video' &&
+        ['uploaded', 'transcribing', 'generating'].includes(row.feedbackStatus)
+    )
+
+    if (!hasActiveVideoJob) {
+      return
+    }
+
+    const interval = window.setInterval(async () => {
+      try {
+        const response = await fetch(`/api/feedback/user/${instructorId}`)
+        if (!response.ok) {
+          return
+        }
+
+        const payload = await getResponsePayload<
+          Array<{
+            id: number
+            status: 'uploaded' | 'transcribing' | 'generating' | 'complete' | 'failed'
+            source_type?: 'pdf' | 'video'
+            error_message?: string | null
+          }>
+        >(response)
+
+        setRows((currentRows) =>
+          currentRows.map((row) => {
+            if (row.sourceType !== 'video' || !row.feedbackId) {
+              return row
+            }
+
+            const match = payload.find((item) => item.id === row.feedbackId)
+            if (!match) {
+              return row
+            }
+
+            return {
+              ...row,
+              feedbackStatus: match.status === 'complete' ? 'ready' : match.status,
+              errorMessage: match.error_message ?? null,
+            }
+          })
+        )
+      } catch {
+        // ignore transient polling failures
+      }
+    }, 2500)
+
+    return () => window.clearInterval(interval)
+  }, [rows, instructorId])
+
   return (
     <section className="dashboard-panel">
       <div className="dashboard-panel-header">
@@ -199,27 +380,43 @@ export default function InstructorDashboardClient({
           <h2>Your uploads</h2>
           <p>
             {rows.length === 0
-              ? 'Upload your first lesson plan PDF to start generating feedback.'
+              ? 'Upload your first lesson plan PDF or lesson video to start generating feedback.'
               : `${readyCount} of ${rows.length} uploads have generated feedback ready to open.`}
           </p>
         </div>
 
         <div className="dashboard-upload-actions">
           <input
-            ref={fileInputRef}
+            ref={pdfInputRef}
             className="dashboard-file-input"
             type="file"
             accept="application/pdf"
-            onChange={handleUpload}
-            disabled={isUploading}
+            onChange={handlePdfUpload}
+            disabled={isUploadingPdf}
+          />
+          <input
+            ref={videoInputRef}
+            className="dashboard-file-input"
+            type="file"
+            accept="video/*"
+            onChange={handleVideoUpload}
+            disabled={isUploadingVideo}
           />
           <button
             type="button"
             className="dashboard-primary-button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isUploading}
+            onClick={() => videoInputRef.current?.click()}
+            disabled={isUploadingVideo}
           >
-            {isUploading ? 'Uploading PDF...' : 'Upload lesson plan PDF'}
+            {isUploadingVideo ? 'Uploading...' : 'Upload lesson video'}
+          </button>
+          <button
+            type="button"
+            className="dashboard-primary-button"
+            onClick={() => pdfInputRef.current?.click()}
+            disabled={isUploadingPdf}
+          >
+            {isUploadingPdf ? 'Uploading PDF...' : 'Upload lesson plan PDF'}
           </button>
         </div>
       </div>
@@ -231,8 +428,8 @@ export default function InstructorDashboardClient({
         <div className="dashboard-empty-state">
           <h3>No uploads yet</h3>
           <p>
-            Start with a lesson plan PDF. Once it uploads, you can generate written feedback and
-            open the feedback PDF from this table.
+            Start with a lesson plan PDF or lesson video. Once it uploads, you can generate
+            feedback and open the feedback file from this table when it is ready.
           </p>
         </div>
       ) : (
@@ -250,7 +447,14 @@ export default function InstructorDashboardClient({
               {rows.map((row) => {
                 const isGenerating = generatingLessonPlanId === row.fileId
                 const isReady = row.feedbackStatus === 'ready' && !!row.feedbackId
-
+                const isVideoInProgress =
+                  row.sourceType === 'video' &&
+                  ['uploaded', 'transcribing', 'generating'].includes(row.feedbackStatus)
+                  const hasActiveVideoJob = rows.some(
+                    (r) =>
+                      r.sourceType === 'video' &&
+                      ['uploaded', 'transcribing', 'generating'].includes(r.feedbackStatus)
+                  )
                 return (
                   <tr key={row.fileId}>
                     <td>
@@ -263,18 +467,16 @@ export default function InstructorDashboardClient({
                     <td>
                       <span
                         className={`dashboard-status-pill ${
-                          isGenerating
-                            ? 'pending'
-                            : isReady
-                              ? 'ready'
-                              : 'not-started'
+                          row.feedbackStatus === 'failed'
+                            ? 'failed'
+                            : isGenerating || isVideoInProgress
+                              ? 'pending'
+                              : isReady
+                                ? 'ready'
+                                : 'not-started'
                         }`}
                       >
-                        {isGenerating
-                          ? 'Generating feedback...'
-                          : isReady
-                            ? 'Feedback ready'
-                            : 'Feedback not generated'}
+                        {getStatusLabel(row, isGenerating)}
                       </span>
                     </td>
                     <td>
@@ -282,10 +484,14 @@ export default function InstructorDashboardClient({
                         <button
                           type="button"
                           className="dashboard-secondary-button"
-                          onClick={() => handleGenerateFeedback(row.fileId, row.fileName)}
-                          disabled={isGenerating}
+                          onClick={() => handleGenerateFeedback(row)}
+                          disabled={isGenerating || isVideoInProgress || hasActiveVideoJob}
                         >
-                          {isGenerating ? 'Generating...' : isReady ? 'Regenerate feedback' : 'Generate feedback'}
+                          {isGenerating || isVideoInProgress || hasActiveVideoJob
+                            ? 'Processing...'
+                            : isReady
+                              ? 'Regenerate feedback'
+                              : 'Generate feedback'}
                         </button>
 
                         {isReady ? (
@@ -300,6 +506,10 @@ export default function InstructorDashboardClient({
                           <span className="dashboard-link-button disabled">View feedback</span>
                         )}
                       </div>
+
+                      {row.feedbackStatus === 'failed' && row.errorMessage ? (
+                        <p className="dashboard-alert error">{row.errorMessage}</p>
+                      ) : null}
                     </td>
                   </tr>
                 )

@@ -8,7 +8,7 @@ const LESSON_PLANS_BUCKET = 'lesson-plans'
 const NEW_THREAD_ID = 'new'
 
 const RAG_WELCOME_TEXT =
-  'Upload a lesson plan PDF (optional). Nothing is sent until you click Send. Add notes if you like, then Send to generate curriculum-aligned feedback. If you skip the upload, we use a built-in sample lesson plan.'
+  'Upload a lesson plan PDF or lesson video (optional). Nothing is sent until you click Send. Add notes if you like, then Send to generate curriculum-aligned feedback. If you skip the upload, we use a built-in sample lesson plan.'
 
 type Thread = {
   id: string
@@ -74,6 +74,7 @@ type Props = {
 export default function InstructorWorkspace({ userId, userEmail }: Props) {
   const supabase = useMemo(() => createClient(), [])
   const pdfInputRef = useRef<HTMLInputElement>(null)
+  const videoInputRef = useRef<HTMLInputElement>(null)
 
   const [threads, setThreads] = useState<Thread[]>([
     { id: NEW_THREAD_ID, title: 'New lesson' },
@@ -189,9 +190,21 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
   }
 
   const handleVideoClick = () => {
-    setUploadError(
-      'Video lesson review is not available yet. Upload a PDF lesson plan to use RAG feedback.'
-    )
+    setUploadError(null)
+    videoInputRef.current?.click()
+  }
+
+  const handleVideoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+
+    if (!file) return
+    setUploadError(null)
+
+    if (!file.type.startsWith('video/')) {
+      setUploadError('Please choose a video file.')
+      return
+    }
   }
 
   const handleSend = useCallback(async () => {
@@ -327,6 +340,13 @@ export default function InstructorWorkspace({ userId, userEmail }: Props) {
         accept="application/pdf"
         style={{ display: 'none' }}
         onChange={handlePdfFile}
+      />
+      <input
+        ref={videoInputRef}
+        type="file"
+        accept="video/*"
+        style={{ display: 'none' }}
+        onChange={handleVideoFile}
       />
 
       <aside className="instructor-sidebar">
