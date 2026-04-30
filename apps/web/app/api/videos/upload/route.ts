@@ -37,7 +37,7 @@ function inferVideoMimeType(bytes: Uint8Array): string | null {
     return 'video/webm'
   }
 
-  return null
+  return null;
 }
 
 function parseAdminMaxVideoSeconds() {
