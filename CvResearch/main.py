@@ -107,67 +107,173 @@ def draw_pose_landmarks(image_bgr, pose_landmarks):
         point = (int(landmark.x * width), int(landmark.y * height))
         cv2.circle(image_bgr, point, 3, (0, 140, 255), -1)
 
-t0 = time.perf_counter()
-cap = cv2.VideoCapture("example_video3.mov")
-fps = cap.get(cv2.CAP_PROP_FPS)
+def _sample_frames(cap, start_s: float, end_s: float, sample_hz: float):
+    """Yield (timestamp_s, frame_bgr) tuples within [start_s, end_s)."""
+    step_s = 1.0 / sample_hz
+    sec = start_s
+    while sec < end_s:
+        cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
+        ok, frame_bgr = cap.read()
+        if not ok:
+            break
+        yield sec, frame_bgr
+        sec += step_s
 
-backend, face, pose, setup_error = create_detectors()
 
-sec = 0
-rows = []
-annotated_images = []
-while True:
-    cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
-    ok, frame_bgr = cap.read()
-    if not ok:
-        break
+def analyze_zoom_segment(
+    video_path: str,
+    *,
+    max_duration_s: float = 300.0,
+    start_offset_s: float = 0.0,
+    sample_hz: float = 1.0,
+) -> dict:
+    """Analyze a video segment with a configurable duration cap.
 
-    t_frame0 = time.perf_counter()
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    annotated = frame_bgr.copy()
-    if backend == "tasks":
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        face_res = face.detect(mp_image)
-        pose_res = pose.detect(mp_image)
-        has_face = bool(face_res.detections)
-        has_pose = bool(pose_res.pose_landmarks)
-        if has_pose:
-            draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
+    Parameters
+    ----------
+    video_path : str
+        Path to the video file to analyze.
+    max_duration_s : float
+        Hard cap on how many seconds of video to analyze (default 300 = 5 min).
+    start_offset_s : float
+        Where in the video to begin analysis (default 0.0 = start).
+    sample_hz : float
+        Frames to sample per second (default 1.0 = one frame/sec).
+
+    Returns
+    -------
+    dict with keys ``rows``, ``annotated_images``, ``meta``.
+    """
+    assert max_duration_s > 0, "max_duration_s must be positive"
+    assert start_offset_s >= 0, "start_offset_s must be non-negative"
+    assert sample_hz > 0, "sample_hz must be positive"
+
+    t0 = time.perf_counter()
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0  # fallback if fps == 0
+
+    # ── compute the analysis window ──────────────────────────
+    frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+    if frame_count <= 0:
+        # Some container formats (.mov, streams) report 0 or -1.
+        # Fall back to inf and let the EOF break the loop.
+        video_duration_s = float("inf")
     else:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        face_boxes = face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-        pose_boxes, _ = pose.detectMultiScale(
-            frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
+        video_duration_s = frame_count / fps
+
+    if start_offset_s >= video_duration_s:
+        cap.release()
+        raise ValueError(
+            f"start_offset_s ({start_offset_s}) exceeds video length "
+            f"({video_duration_s:.1f}s)"
         )
-        has_face = len(face_boxes) > 0
-        has_pose = len(pose_boxes) > 0
-        for (x, y, w, h) in pose_boxes:
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
-    t_frame1 = time.perf_counter()
 
-    rows.append(
-        {
-            "sec": sec,
-            "frame_ms": (t_frame1 - t_frame0) * 1000,
-            "has_face": has_face,
-            "has_pose": has_pose,
-        }
+    analysis_start_s = start_offset_s
+    analysis_end_s = min(analysis_start_s + max_duration_s, video_duration_s)
+    # ─────────────────────────────────────────────────────────
+
+    backend, face, pose, setup_error = create_detectors()
+
+    rows = []
+    annotated_images = []
+    last_sec = analysis_start_s  # track actual last sampled timestamp
+
+    for sec, frame_bgr in _sample_frames(cap, analysis_start_s, analysis_end_s, sample_hz):
+        t_frame0 = time.perf_counter()
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        annotated = frame_bgr.copy()
+        if backend == "tasks":
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            face_res = face.detect(mp_image)
+            pose_res = pose.detect(mp_image)
+            has_face = bool(face_res.detections)
+            has_pose = bool(pose_res.pose_landmarks)
+            if has_pose:
+                draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
+        else:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            face_boxes = face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+            pose_boxes, _ = pose.detectMultiScale(
+                frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
+            )
+            has_face = len(face_boxes) > 0
+            has_pose = len(pose_boxes) > 0
+            for (x, y, w, h) in pose_boxes:
+                cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        t_frame1 = time.perf_counter()
+
+        rows.append(
+            {
+                "sec": sec,
+                "frame_ms": (t_frame1 - t_frame0) * 1000,
+                "has_face": has_face,
+                "has_pose": has_pose,
+            }
+        )
+        annotated_images.append(annotated)
+        last_sec = sec
+
+    if backend == "tasks":
+        face.close()
+        pose.close()
+    cap.release()
+
+    # If video_duration_s was inf (unknown), compute from what we actually saw
+    if video_duration_s == float("inf") and rows:
+        effective_duration_s = last_sec - analysis_start_s + (1.0 / sample_hz)
+    else:
+        effective_duration_s = analysis_end_s - analysis_start_s
+
+    t1 = time.perf_counter()
+
+    meta = {
+        "max_duration_s": max_duration_s,
+        "start_offset_s": start_offset_s,
+        "video_duration_s": video_duration_s if video_duration_s != float("inf") else None,
+        "effective_duration_s": round(effective_duration_s, 2),
+        "sample_hz": sample_hz,
+        "backend": backend,
+        "wall_time_s": round(t1 - t0, 3),
+        "setup_error": setup_error or None,
+    }
+
+    return {
+        "rows": rows,
+        "annotated_images": annotated_images,
+        "meta": meta,
+    }
+
+
+# ── CLI entry point ──────────────────────────────────────────
+if __name__ == "__main__":
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Analyze a video segment")
+    parser.add_argument("video", help="Path to the video file")
+    parser.add_argument("--max-duration", type=float, default=300.0,
+                        help="Max seconds to analyze (default: 300)")
+    parser.add_argument("--start-offset", type=float, default=0.0,
+                        help="Start offset in seconds (default: 0)")
+    parser.add_argument("--sample-hz", type=float, default=1.0,
+                        help="Frames per second to sample (default: 1)")
+    parser.add_argument("--save-images", action="store_true",
+                        help="Write annotated frames as img0.png, img1.png, …")
+    args = parser.parse_args()
+
+    result = analyze_zoom_segment(
+        args.video,
+        max_duration_s=args.max_duration,
+        start_offset_s=args.start_offset,
+        sample_hz=args.sample_hz,
     )
-    annotated_images.append(annotated)
-    sec += 1
 
-if backend == "tasks":
-    face.close()
-    pose.close()
-cap.release()
+    meta = result["meta"]
+    rows = result["rows"]
+    print(json.dumps(meta, indent=2))
+    print(f"sampled_frames={len(rows)}")
 
-t1 = time.perf_counter()
-total_s = t1 - t0
-print(f"backend={backend} sampled_seconds={len(rows)} Total time={total_s:.3f}")
-print(f"annotated_images_count={len(annotated_images)}")
-index = 0
-for im in annotated_images:
-    cv2.imwrite(f"img{index}.png",im)
-    index=index+1
-if setup_error:
-    print(f"tasks_setup_error={setup_error}")
+    if args.save_images:
+        for i, im in enumerate(result["annotated_images"]):
+            cv2.imwrite(f"img{i}.png", im)
+        print(f"annotated_images_count={len(result['annotated_images'])}")
