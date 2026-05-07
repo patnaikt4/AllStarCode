@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 
 import { getFeedbackStorageBucket } from '@/lib/feedback/feedback-storage-bucket'
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
+import { transcribeVideoBuffer } from '@/lib/feedback/transcribe-video'
 
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
@@ -19,7 +21,11 @@ type GenerateFeedbackRequest = {
   file_id?: unknown
   sessionId?: unknown
   message?: unknown
+  source_type?: unknown
+  videoFileId?: unknown
 }
+
+const VIDEO_SOURCE_BUCKET = 'videos'
 
 type HttpError = Error & {
   status?: number
@@ -384,20 +390,36 @@ export async function POST(request: Request) {
     const originalFilename = getOptionalTrimmedString(body.originalFilename)
     const requestedSessionId = getOptionalTrimmedString(body.sessionId)
     const requestMessage = getOptionalTrimmedString(body.message)
+    const sourceType = body.source_type === 'video' ? 'video' : 'pdf'
+    const videoFileId =
+      typeof body.videoFileId === 'string' ? body.videoFileId.trim() : ''
 
-    if (!fileId && (!instructorId || !lessonPlanId)) {
-      return createErrorResponse(
-        400,
-        'Request body must include file_id or instructorId and lessonPlanId.'
-      )
-    }
-
-    if (fileId && !isValidUuid(fileId)) {
-      return createErrorResponse(400, 'file_id must be a valid UUID.')
-    }
-
-    if (!fileId && !isValidUuid(instructorId)) {
-      return createErrorResponse(400, 'instructorId must be a valid UUID.')
+    if (sourceType === 'video') {
+      if (!instructorId || !videoFileId) {
+        return createErrorResponse(
+          400,
+          'Video feedback requires instructorId and videoFileId.'
+        )
+      }
+      if (!isValidUuid(instructorId)) {
+        return createErrorResponse(400, 'instructorId must be a valid UUID.')
+      }
+      if (!isValidUuid(videoFileId)) {
+        return createErrorResponse(400, 'videoFileId must be a valid UUID.')
+      }
+    } else {
+      if (!fileId && (!instructorId || !lessonPlanId)) {
+        return createErrorResponse(
+          400,
+          'Request body must include file_id or instructorId and lessonPlanId.'
+        )
+      }
+      if (fileId && !isValidUuid(fileId)) {
+        return createErrorResponse(400, 'file_id must be a valid UUID.')
+      }
+      if (!fileId && !isValidUuid(instructorId)) {
+        return createErrorResponse(400, 'instructorId must be a valid UUID.')
+      }
     }
 
     if (requestedSessionId && !isValidUuid(requestedSessionId)) {
@@ -434,6 +456,118 @@ export async function POST(request: Request) {
     }
 
     const isAdmin = isAdminRole(profile.role)
+
+    if (sourceType === 'video') {
+      const isOwnVideo = user.id === instructorId
+
+      if (!isAdmin && !isOwnVideo) {
+        return createErrorResponse(
+          403,
+          'You are not allowed to generate feedback for this video.'
+        )
+      }
+
+      // Find the video object in storage. The upload stores it as {instructorId}/{videoFileId}{ext}.
+      const { data: listedFiles, error: listError } = await supabase.storage
+        .from(VIDEO_SOURCE_BUCKET)
+        .list(instructorId, { search: videoFileId })
+
+      if (listError) {
+        console.error('Failed to list video files:', listError)
+        return createErrorResponse(500, 'Failed to look up video file.')
+      }
+
+      const videoObject = listedFiles?.find((f) => f.name.startsWith(videoFileId))
+
+      if (!videoObject) {
+        return createErrorResponse(404, 'Video file not found.')
+      }
+
+      const videoStoragePath = `${instructorId}/${videoObject.name}`
+      const extension = path.extname(videoObject.name) || '.mp4'
+
+      const { data: videoData, error: downloadError } = await supabase.storage
+        .from(VIDEO_SOURCE_BUCKET)
+        .download(videoStoragePath)
+
+      if (downloadError || !videoData) {
+        console.error('Failed to download video:', downloadError)
+        return createErrorResponse(500, 'Failed to download video file.')
+      }
+
+      const videoBuffer = Buffer.from(await videoData.arrayBuffer())
+
+      let chatSessionId: string | null = null
+
+      if (requestedSessionId) {
+        chatSessionId = await ensureChatSession({
+          supabase,
+          userId: user.id,
+          sessionId: requestedSessionId,
+          title: chatTitle,
+        })
+
+        await insertChatMessage({
+          supabase,
+          sessionId: chatSessionId,
+          role: 'user',
+          content: userMessage,
+        })
+      }
+
+      let transcript: string
+      try {
+        transcript = await transcribeVideoBuffer({ buffer: videoBuffer, extension })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Transcription failed.'
+        console.error('Video transcription failed:', error)
+        return createErrorResponse(500, `Transcription failed: ${message}`)
+      }
+
+      if (!transcript) {
+        return createErrorResponse(400, 'Video transcript is empty.')
+      }
+
+      const feedback = await getFeedbackFromRag(transcript, { source: 'video_transcript' })
+
+      const feedbackPdf = await renderFeedbackPdf({
+        title: 'AllStarCode Video Session Feedback',
+        instructorId,
+        lessonPlanId: videoFileId,
+        feedback,
+      })
+
+      const { feedbackId, storagePath } = await storeFeedbackPdf({
+        supabase,
+        instructorId,
+        lessonPlanId: videoFileId,
+        feedback,
+        pdfBuffer: feedbackPdf,
+        originalFilename: videoObject.name,
+      })
+
+      const assistantMessage = 'Your feedback PDF is ready. Open it for the full write-up.'
+
+      if (chatSessionId) {
+        await insertChatMessage({
+          supabase,
+          sessionId: chatSessionId,
+          role: 'assistant',
+          content: assistantMessage,
+          feedbackId,
+        })
+      }
+
+      return jsonResponse(
+        {
+          success: true,
+          feedbackId,
+          ...(chatSessionId ? { sessionId: chatSessionId } : {}),
+          storagePath,
+        },
+        200
+      )
+    }
 
     if (fileId) {
       const uploaded = await getUploadedPdf({ supabase, fileId })
