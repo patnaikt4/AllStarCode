@@ -2,6 +2,7 @@ import os
 import time
 import urllib.request
 from pathlib import Path
+from typing import Union
 
 os.environ.setdefault("MPLCONFIGDIR", str((Path.cwd() / ".mplconfig").resolve()))
 
@@ -38,7 +39,9 @@ POSE_MODEL_URL = (
 def ensure_model(model_path: Path, model_url: str) -> None:
     if model_path.exists():
         return
+
     model_path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
         urllib.request.urlretrieve(model_url, model_path)
     except Exception as exc:
@@ -61,6 +64,7 @@ def create_detectors():
             ),
             min_detection_confidence=0.5,
         )
+
         pose_options = vision.PoseLandmarkerOptions(
             base_options=python.BaseOptions(
                 model_asset_path=str(POSE_MODEL_PATH),
@@ -73,17 +77,22 @@ def create_detectors():
 
         face = vision.FaceDetector.create_from_options(face_options)
         pose = vision.PoseLandmarker.create_from_options(pose_options)
+
         return "tasks", face, pose, ""
+
     except Exception as exc:
         # Some macOS/headless builds fail to initialize Task graphs due to GL
         # service requirements. Fall back to OpenCV pretrained detectors.
         face = cv2.CascadeClassifier(
             str(Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml")
         )
+
         pose = cv2.HOGDescriptor()
         pose.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+
         if face.empty():
             raise RuntimeError("OpenCV face cascade failed to load.") from exc
+
         return "opencv", face, pose, str(exc)
 
 
@@ -92,82 +101,187 @@ POSE_CONNECTIONS = pose_landmarker.PoseLandmarksConnections.POSE_LANDMARKS
 
 def draw_pose_landmarks(image_bgr, pose_landmarks):
     height, width = image_bgr.shape[:2]
+
     for connection in POSE_CONNECTIONS:
         start_lm = pose_landmarks[connection.start]
         end_lm = pose_landmarks[connection.end]
+
         if start_lm.visibility < 0.5 or end_lm.visibility < 0.5:
             continue
+
         start_xy = (int(start_lm.x * width), int(start_lm.y * height))
         end_xy = (int(end_lm.x * width), int(end_lm.y * height))
+
         cv2.line(image_bgr, start_xy, end_xy, (0, 255, 0), 2)
 
     for landmark in pose_landmarks:
         if landmark.visibility < 0.5:
             continue
+
         point = (int(landmark.x * width), int(landmark.y * height))
         cv2.circle(image_bgr, point, 3, (0, 140, 255), -1)
 
-t0 = time.perf_counter()
-cap = cv2.VideoCapture("example_video3.mov")
-fps = cap.get(cv2.CAP_PROP_FPS)
 
-backend, face, pose, setup_error = create_detectors()
+def _load_video(path: Union[str, Path]):
+    path = Path(path)
+    cap = cv2.VideoCapture(str(path))
 
-sec = 0
-rows = []
-annotated_images = []
-while True:
-    cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
-    ok, frame_bgr = cap.read()
-    if not ok:
-        break
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {path}")
 
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
+
+    return cap, fps
+
+
+def _sample_frames(cap, start_s: float, end_s: float, sample_hz: float):
+    if sample_hz <= 0:
+        raise ValueError("sample_hz must be > 0")
+
+    step_s = 1.0 / sample_hz
+    sec = start_s
+
+    while sec < end_s:
+        cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000.0)
+
+        ok, frame_bgr = cap.read()
+        if not ok or frame_bgr is None:
+            break
+
+        yield sec, frame_bgr
+        sec += step_s
+
+
+def _process_frame(frame_bgr, backend, face, pose):
     t_frame0 = time.perf_counter()
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    annotated = frame_bgr.copy()
+
+    blendshapes = {}
+
     if backend == "tasks":
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+
         face_res = face.detect(mp_image)
         pose_res = pose.detect(mp_image)
+
         has_face = bool(face_res.detections)
         has_pose = bool(pose_res.pose_landmarks)
-        if has_pose:
-            draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
+
+        # This file currently uses MediaPipe FaceDetector, which detects faces
+        # but does not return blendshapes. Blendshapes can be added later by
+        # switching this to FaceLandmarker.
+        blendshapes = {}
+
     else:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        face_boxes = face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-        pose_boxes, _ = pose.detectMultiScale(
-            frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
+
+        face_boxes = face.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
         )
+
+        pose_boxes, _ = pose.detectMultiScale(
+            frame_bgr,
+            winStride=(8, 8),
+            padding=(8, 8),
+            scale=1.05,
+        )
+
         has_face = len(face_boxes) > 0
         has_pose = len(pose_boxes) > 0
-        for (x, y, w, h) in pose_boxes:
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        blendshapes = {}
+
     t_frame1 = time.perf_counter()
+    frame_ms = (t_frame1 - t_frame0) * 1000.0
 
-    rows.append(
-        {
-            "sec": sec,
-            "frame_ms": (t_frame1 - t_frame0) * 1000,
-            "has_face": has_face,
-            "has_pose": has_pose,
-        }
-    )
-    annotated_images.append(annotated)
-    sec += 1
+    return has_face, has_pose, blendshapes, frame_ms
 
-if backend == "tasks":
-    face.close()
-    pose.close()
-cap.release()
 
-t1 = time.perf_counter()
-total_s = t1 - t0
-print(f"backend={backend} sampled_seconds={len(rows)} Total time={total_s:.3f}")
-print(f"annotated_images_count={len(annotated_images)}")
-index = 0
-for im in annotated_images:
-    cv2.imwrite(f"img{index}.png",im)
-    index=index+1
-if setup_error:
-    print(f"tasks_setup_error={setup_error}")
+def analyze_zoom_segment(
+    video_path: Union[str, Path],
+    *,
+    max_duration_s: float = 300.0,
+    sample_hz: float = 1.0,
+    start_offset_s: float = 0.0,
+) -> dict:
+    wall_start = time.perf_counter()
+
+    video_path = Path(video_path)
+    cap = None
+    fps = 0.0
+    backend = "unknown"
+    setup_error = ""
+    samples = []
+    effective_duration_s = 0.0
+
+    try:
+        cap, fps = _load_video(video_path)
+
+        backend, face, pose, setup_error = create_detectors()
+
+        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+        video_duration_s = total_frames / fps if fps else max_duration_s
+
+        start_s = max(0.0, start_offset_s)
+        end_s = min(video_duration_s, start_s + max_duration_s)
+        effective_duration_s = max(0.0, end_s - start_s)
+
+        try:
+            for sec, frame_bgr in _sample_frames(cap, start_s, end_s, sample_hz):
+                has_face, has_pose, blendshapes, frame_ms = _process_frame(
+                    frame_bgr,
+                    backend,
+                    face,
+                    pose,
+                )
+
+                samples.append(
+                    {
+                        "sec": sec,
+                        "frame_ms": frame_ms,
+                        "has_face": has_face,
+                        "has_pose": has_pose,
+                        "blendshapes": blendshapes,
+                    }
+                )
+
+        finally:
+            if backend == "tasks":
+                face.close()
+                pose.close()
+
+    except Exception as exc:
+        setup_error = str(exc)
+
+    finally:
+        if cap is not None:
+            cap.release()
+
+    total_wall_s = time.perf_counter() - wall_start
+
+    return {
+        "meta": {
+            "video_path": str(video_path),
+            "backend": backend,
+            "fps": fps,
+            "effective_duration_s": effective_duration_s,
+            "sample_hz": sample_hz,
+            "sample_count": len(samples),
+            "total_wall_s": total_wall_s,
+            "setup_error": setup_error,
+        },
+        "samples": samples,
+        "aggregates": {},
+    }
+
+
+if __name__ == "__main__":
+    import json
+    import sys
+
+    if len(sys.argv) < 2:
+        raise SystemExit("Usage: python CvResearch/main.py <video_path>")
+
+    result = analyze_zoom_segment(sys.argv[1])
+    json.dump(result, sys.stdout, indent=2)
