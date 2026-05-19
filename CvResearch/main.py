@@ -107,67 +107,118 @@ def draw_pose_landmarks(image_bgr, pose_landmarks):
         point = (int(landmark.x * width), int(landmark.y * height))
         cv2.circle(image_bgr, point, 3, (0, 140, 255), -1)
 
-t0 = time.perf_counter()
-cap = cv2.VideoCapture("example_video3.mov")
-fps = cap.get(cv2.CAP_PROP_FPS)
 
-backend, face, pose, setup_error = create_detectors()
+def _compute_aggregates(samples: list[dict], top_k: int = 5) -> dict:
+    n = len(samples)
+    if n == 0:
+        return {}
 
-sec = 0
-rows = []
-annotated_images = []
-while True:
-    cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
-    ok, frame_bgr = cap.read()
-    if not ok:
-        break
+    face_samples = [s for s in samples if s["has_face"]]
+    pose_samples = [s for s in samples if s["has_pose"]]
 
-    t_frame0 = time.perf_counter()
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    annotated = frame_bgr.copy()
-    if backend == "tasks":
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        face_res = face.detect(mp_image)
-        pose_res = pose.detect(mp_image)
-        has_face = bool(face_res.detections)
-        has_pose = bool(pose_res.pose_landmarks)
-        if has_pose:
-            draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
-    else:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        face_boxes = face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-        pose_boxes, _ = pose.detectMultiScale(
-            frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
+    blendshape_sums: dict[str, float] = {}
+    for s in face_samples:
+        for k, v in s.get("blendshapes", {}).items():
+            blendshape_sums[k] = blendshape_sums.get(k, 0.0) + v
+    nf = len(face_samples) or 1
+    blendshape_means = {k: v / nf for k, v in blendshape_sums.items()}
+    top = sorted(blendshape_means.items(), key=lambda x: -x[1])[:top_k]
+
+    return {
+        "face_visibility_ratio": len(face_samples) / n,
+        "pose_visibility_ratio": len(pose_samples) / n,
+        "blendshape_means": blendshape_means,
+        "top_blendshapes": [{"name": k, "mean": round(v, 4)} for k, v in top],
+        "sample_count": n,
+        "face_sample_count": len(face_samples),
+    }
+
+
+def analyze_zoom_segment(video_path: str) -> dict:
+    t0 = time.perf_counter()
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    backend, face_det, pose_det, setup_error = create_detectors()
+
+    sec = 0
+    samples = []
+    annotated_images = []
+
+    while True:
+        cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
+        ok, frame_bgr = cap.read()
+        if not ok:
+            break
+
+        t_frame0 = time.perf_counter()
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        annotated = frame_bgr.copy()
+
+        if backend == "tasks":
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+            face_res = face_det.detect(mp_image)
+            pose_res = pose_det.detect(mp_image)
+            has_face = bool(face_res.detections)
+            has_pose = bool(pose_res.pose_landmarks)
+            if has_pose:
+                draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
+        else:
+            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+            face_boxes = face_det.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+            pose_boxes, _ = pose_det.detectMultiScale(
+                frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
+            )
+            has_face = len(face_boxes) > 0
+            has_pose = len(pose_boxes) > 0
+            for (x, y, w, h) in pose_boxes:
+                cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+        t_frame1 = time.perf_counter()
+
+        samples.append(
+            {
+                "sec": sec,
+                "frame_ms": (t_frame1 - t_frame0) * 1000,
+                "has_face": has_face,
+                "has_pose": has_pose,
+            }
         )
-        has_face = len(face_boxes) > 0
-        has_pose = len(pose_boxes) > 0
-        for (x, y, w, h) in pose_boxes:
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
-    t_frame1 = time.perf_counter()
+        annotated_images.append(annotated)
+        sec += 1
 
-    rows.append(
-        {
-            "sec": sec,
-            "frame_ms": (t_frame1 - t_frame0) * 1000,
-            "has_face": has_face,
-            "has_pose": has_pose,
-        }
-    )
-    annotated_images.append(annotated)
-    sec += 1
+    if backend == "tasks":
+        face_det.close()
+        pose_det.close()
+    cap.release()
 
-if backend == "tasks":
-    face.close()
-    pose.close()
-cap.release()
+    t1 = time.perf_counter()
 
-t1 = time.perf_counter()
-total_s = t1 - t0
-print(f"backend={backend} sampled_seconds={len(rows)} Total time={total_s:.3f}")
-print(f"annotated_images_count={len(annotated_images)}")
-index = 0
-for im in annotated_images:
-    cv2.imwrite(f"img{index}.png",im)
-    index=index+1
-if setup_error:
-    print(f"tasks_setup_error={setup_error}")
+    return {
+        "samples": samples,
+        "aggregates": _compute_aggregates(samples),
+        "annotated_images": annotated_images,
+        "backend": backend,
+        "setup_error": setup_error,
+        "fps": fps,
+        "total_time_s": t1 - t0,
+    }
+
+
+if __name__ == "__main__":
+    result = analyze_zoom_segment("example_video3.mov")
+
+    samples = result["samples"]
+    aggregates = result["aggregates"]
+
+    print(f"backend={result['backend']} sampled_seconds={len(samples)} total_time={result['total_time_s']:.3f}s")
+    print(f"annotated_images_count={len(result['annotated_images'])}")
+    print(f"face_visibility_ratio={aggregates.get('face_visibility_ratio', 'n/a'):.2f}")
+    print(f"pose_visibility_ratio={aggregates.get('pose_visibility_ratio', 'n/a'):.2f}")
+    print(f"top_blendshapes={aggregates.get('top_blendshapes', [])}")
+
+    for i, im in enumerate(result["annotated_images"]):
+        cv2.imwrite(f"img{i}.png", im)
+
+    if result["setup_error"]:
+        print(f"tasks_setup_error={result['setup_error']}")

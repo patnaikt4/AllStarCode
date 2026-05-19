@@ -133,6 +133,13 @@ export default async function InstructorDashboardPage() {
           </p>
         </div>
 
+        <div className="dashboard-sidebar-block">
+          <p className="dashboard-sidebar-label">Tools</p>
+          <a href="/dashboard/instructor/chat" className="dashboard-nav-link">
+            AI Chat Assistant
+          </a>
+        </div>
+
         <div className="dashboard-sidebar-block dashboard-sidebar-meta">
           <p className="dashboard-sidebar-label">Signed In As</p>
           <p className="dashboard-user-email">{user.email}</p>
