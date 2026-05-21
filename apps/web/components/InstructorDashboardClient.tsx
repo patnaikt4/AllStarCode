@@ -505,6 +505,13 @@ export default function InstructorDashboardClient({
                         ) : (
                           <span className="dashboard-link-button disabled">View feedback</span>
                         )}
+
+                        <Link
+                          className="dashboard-secondary-button"
+                          href={`/dashboard/instructor/chat?fileId=${row.fileId}&fileName=${encodeURIComponent(row.fileName)}`}
+                        >
+                          Chat about this
+                        </Link>
                       </div>
 
                       {row.feedbackStatus === 'failed' && row.errorMessage ? (
