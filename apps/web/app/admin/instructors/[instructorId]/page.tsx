@@ -2,6 +2,7 @@ import { redirect, notFound } from 'next/navigation'
 import { createClient } from '@/lib/supabase/server'
 import Link from 'next/link'
 import LogoutButton from '@/components/LogoutButton'
+import VideoDurationCap from '@/components/VideoDurationCap'
 
 export default async function InstructorDetailPage({
   params,
@@ -20,7 +21,7 @@ export default async function InstructorDetailPage({
   // confirm this instructor belongs to the logged-in admin
   const { data: instructor } = await supabase
     .from('profiles')
-    .select('id, email')
+    .select('id, email, max_video_duration_seconds')
     .eq('id', instructorId)
     .eq('assigned_admin_id', user.id)
     .single()
@@ -31,7 +32,7 @@ export default async function InstructorDetailPage({
   const [filesRes, feedbackRes, instructorsRes] = await Promise.all([
     supabase
       .from('files')
-      .select('file_id, original_name, storage_path, created_at')
+      .select('file_id, original_name, storage_path, content_type, created_at')
       .eq('user_id', instructorId)
       .order('created_at', { ascending: false }),
     supabase
@@ -49,12 +50,17 @@ export default async function InstructorDetailPage({
   const rawFiles = filesRes.data ?? []
 
   // generate signed URLs for each file so the admin can open/download them
-  const files = await Promise.all(
+  const allFiles = await Promise.all(
     rawFiles.map(async f => {
-      const { data } = await supabase.storage.from('documents').createSignedUrl(f.storage_path, 3600)
-      return { ...f, signedUrl: data?.signedUrl ?? null }
+      const isVideo = (f.content_type ?? '').startsWith('video/')
+      const bucket = isVideo ? 'videos' : 'documents'
+      const { data } = await supabase.storage.from(bucket).createSignedUrl(f.storage_path, 3600)
+      return { ...f, signedUrl: data?.signedUrl ?? null, isVideo }
     })
   )
+
+  const pdfFiles = allFiles.filter(f => !f.isVideo)
+  const videoFiles = allFiles.filter(f => f.isVideo)
 
   const rawFeedback = feedbackRes.data ?? []
 
@@ -106,7 +112,7 @@ export default async function InstructorDetailPage({
       <div className="instructor-main">
         <div className="instructor-topbar">
           <p className="instructor-topbar-title">{instructor.email}</p>
-          <span className="instructor-topbar-meta">{files.length} files · {feedback.length} feedback</span>
+          <span className="instructor-topbar-meta">{pdfFiles.length} PDFs · {videoFiles.length} videos · {feedback.length} feedback</span>
         </div>
 
         <div className="instructor-thread">
@@ -119,16 +125,43 @@ export default async function InstructorDetailPage({
             </div>
           </div>
 
-          {/* files */}
+          {/* Lesson PDFs */}
           <div className="admin-detail-section">
-            <p className="admin-detail-label">files ({files.length})</p>
-            {files.length === 0 ? (
-              <p className="admin-empty">no files uploaded</p>
+            <p className="admin-detail-label">Lesson PDFs ({pdfFiles.length})</p>
+            {pdfFiles.length === 0 ? (
+              <p className="admin-empty">no PDFs uploaded</p>
             ) : (
               <div className="admin-file-list">
-                {files.map(f => (
+                {pdfFiles.map(f => (
                   <div key={f.file_id} className="admin-file-row">
-                    <span className="file-chip-icon">PDF</span>
+                    <span className="file-chip-icon" style={{ background: '#e8f4fd', color: '#0070f3' }}>PDF</span>
+                    <div className="admin-file-info">
+                      {f.signedUrl
+                        ? <a href={f.signedUrl} target="_blank" rel="noreferrer" className="admin-file-link">{f.original_name}</a>
+                        : <span className="admin-file-link" style={{ cursor: 'default' }}>{f.original_name}</span>
+                      }
+                      <span className="admin-file-date">{new Date(f.created_at).toLocaleDateString()}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Videos */}
+          <div className="admin-detail-section">
+            <p className="admin-detail-label">Videos ({videoFiles.length})</p>
+            <VideoDurationCap
+              instructorId={instructorId}
+              initialSeconds={instructor.max_video_duration_seconds ?? null}
+            />
+            {videoFiles.length === 0 ? (
+              <p className="admin-empty">no videos uploaded</p>
+            ) : (
+              <div className="admin-file-list">
+                {videoFiles.map(f => (
+                  <div key={f.file_id} className="admin-file-row">
+                    <span className="file-chip-icon" style={{ background: '#e8f5e9', color: '#2e7d32', width: 'auto', padding: '0 6px', fontSize: '0.72rem' }}>Video</span>
                     <div className="admin-file-info">
                       {f.signedUrl
                         ? <a href={f.signedUrl} target="_blank" rel="noreferrer" className="admin-file-link">{f.original_name}</a>

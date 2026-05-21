@@ -88,11 +88,12 @@ python scripts/test_similarity.py
 
 ## How this plugs into the LLM prompt
 
-1. **API route** `apps/web/app/api/feedback/generate/route.ts` calls `getFeedbackFromRag()` in `apps/web/lib/feedback/get-feedback-from-rag.ts`.
-2. **RAG step:** `retrieveCurriculumContext()` runs `similarity_search.py` with the **extracted lesson plan text** on stdin and reads JSON chunks from stdout. If the script is missing or fails, it falls back to a placeholder string.
-3. **Prompting:** `buildFeedbackPrompt()` injects the formatted **curriculum context** plus the **lesson plan text** into the user message; `FEEDBACK_SYSTEM_PROMPT` sets the coach role. The model is configured via `OPENAI_FEEDBACK_MODEL` (default `gpt-5-mini`).
+1. **API routes:** `apps/web/app/api/feedback/generate/route.ts` calls `getFeedbackFromRag()` for lesson-plan feedback. `apps/web/app/api/chat/message/route.ts` calls `getChatResponseFromRag()` for text-only chat.
+2. **RAG step:** shared helper `apps/web/lib/rag/retrieve-curriculum-context.ts` runs `similarity_search.py` with the query text on stdin and reads JSON chunks from stdout. If the script is missing or fails, it falls back to a placeholder string.
+3. **Feedback prompting:** `getFeedbackFromRag()` retrieves with the **extracted lesson plan text**, then injects the formatted curriculum context plus lesson plan text into the feedback prompt. `FEEDBACK_SYSTEM_PROMPT` sets the coach role. The model is configured via `OPENAI_FEEDBACK_MODEL` (default `gpt-5-mini`).
+4. **Chat prompting:** `getChatResponseFromRag()` retrieves with the **current user message**, then answers with a dedicated instructional-assistant system prompt grounded in the retrieved curriculum and recent capped chat history. The model is configured via `OPENAI_CHAT_MODEL`, falling back to `OPENAI_FEEDBACK_MODEL`, then `gpt-5-mini`.
 
-So: **lesson plan text → embed + match chunks → stringify context → LLM** alongside the system instructions.
+So: **lesson plan text or chat message → embed + match chunks → stringify context → task-specific LLM prompt**.
 
 ---
 
