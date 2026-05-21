@@ -1,4 +1,7 @@
+import argparse
+import json
 import os
+import sys
 import time
 import urllib.request
 from pathlib import Path
@@ -107,67 +110,135 @@ def draw_pose_landmarks(image_bgr, pose_landmarks):
         point = (int(landmark.x * width), int(landmark.y * height))
         cv2.circle(image_bgr, point, 3, (0, 140, 255), -1)
 
-t0 = time.perf_counter()
-cap = cv2.VideoCapture("example_video3.mov")
-fps = cap.get(cv2.CAP_PROP_FPS)
 
-backend, face, pose, setup_error = create_detectors()
+def analyze_video(video_path: Path, annotated_dir: Path = None) -> dict:
+    video_path = Path(video_path)
+    if not video_path.exists():
+        raise FileNotFoundError(f"Video file not found: {video_path}")
 
-sec = 0
-rows = []
-annotated_images = []
-while True:
-    cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
-    ok, frame_bgr = cap.read()
-    if not ok:
-        break
+    if annotated_dir is not None:
+        annotated_dir = Path(annotated_dir)
+        annotated_dir.mkdir(parents=True, exist_ok=True)
 
-    t_frame0 = time.perf_counter()
-    frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-    annotated = frame_bgr.copy()
-    if backend == "tasks":
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-        face_res = face.detect(mp_image)
-        pose_res = pose.detect(mp_image)
-        has_face = bool(face_res.detections)
-        has_pose = bool(pose_res.pose_landmarks)
-        if has_pose:
-            draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
-    else:
-        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        face_boxes = face.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-        pose_boxes, _ = pose.detectMultiScale(
-            frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
-        )
-        has_face = len(face_boxes) > 0
-        has_pose = len(pose_boxes) > 0
-        for (x, y, w, h) in pose_boxes:
-            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
-    t_frame1 = time.perf_counter()
+    t0 = time.perf_counter()
+    cap = cv2.VideoCapture(str(video_path))
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video file: {video_path}")
 
-    rows.append(
-        {
-            "sec": sec,
-            "frame_ms": (t_frame1 - t_frame0) * 1000,
-            "has_face": has_face,
-            "has_pose": has_pose,
-        }
+    backend = None
+    face = None
+    pose = None
+    setup_error = ""
+    rows = []
+    annotated_images_count = 0
+
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        backend, face, pose, setup_error = create_detectors()
+
+        sec = 0
+        while True:
+            cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
+            ok, frame_bgr = cap.read()
+            if not ok:
+                break
+
+            t_frame0 = time.perf_counter()
+            frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+            annotated = frame_bgr.copy()
+            if backend == "tasks":
+                mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
+                face_res = face.detect(mp_image)
+                pose_res = pose.detect(mp_image)
+                has_face = bool(face_res.detections)
+                has_pose = bool(pose_res.pose_landmarks)
+                if has_pose:
+                    draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
+            else:
+                gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+                face_boxes = face.detectMultiScale(
+                    gray, scaleFactor=1.1, minNeighbors=5
+                )
+                pose_boxes, _ = pose.detectMultiScale(
+                    frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
+                )
+                has_face = len(face_boxes) > 0
+                has_pose = len(pose_boxes) > 0
+                for (x, y, w, h) in pose_boxes:
+                    cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            t_frame1 = time.perf_counter()
+
+            rows.append(
+                {
+                    "sec": sec,
+                    "frame_ms": (t_frame1 - t_frame0) * 1000,
+                    "has_face": has_face,
+                    "has_pose": has_pose,
+                }
+            )
+            if annotated_dir is not None:
+                cv2.imwrite(
+                    str(annotated_dir / f"img{annotated_images_count}.png"), annotated
+                )
+            annotated_images_count += 1
+            sec += 1
+    finally:
+        if backend == "tasks":
+            face.close()
+            pose.close()
+        cap.release()
+
+    total_s = time.perf_counter() - t0
+    frame_ms = [row["frame_ms"] for row in rows]
+    meta = {
+        "video_path": str(video_path),
+        "backend": backend,
+        "fps": fps,
+        "sample_count": len(rows),
+        "annotated_images_count": annotated_images_count,
+        "total_seconds": total_s,
+    }
+    if setup_error:
+        meta["tasks_setup_error"] = setup_error
+    if annotated_dir is not None:
+        meta["annotated_dir"] = str(annotated_dir)
+
+    return {
+        "meta": meta,
+        "samples": rows,
+        "aggregates": {
+            "frames_with_face": sum(1 for row in rows if row["has_face"]),
+            "frames_with_pose": sum(1 for row in rows if row["has_pose"]),
+            "avg_frame_ms": sum(frame_ms) / len(frame_ms) if frame_ms else 0,
+        },
+    }
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Sample a video at 1 fps and detect faces/poses."
     )
-    annotated_images.append(annotated)
-    sec += 1
+    parser.add_argument("video_path", type=Path, help="Path to the video to analyze.")
+    parser.add_argument(
+        "--annotated-dir",
+        type=Path,
+        help="Optional directory for annotated sampled frames.",
+    )
+    return parser.parse_args(argv)
 
-if backend == "tasks":
-    face.close()
-    pose.close()
-cap.release()
 
-t1 = time.perf_counter()
-total_s = t1 - t0
-print(f"backend={backend} sampled_seconds={len(rows)} Total time={total_s:.3f}")
-print(f"annotated_images_count={len(annotated_images)}")
-index = 0
-for im in annotated_images:
-    cv2.imwrite(f"img{index}.png",im)
-    index=index+1
-if setup_error:
-    print(f"tasks_setup_error={setup_error}")
+def main(argv=None) -> int:
+    args = parse_args(argv)
+    try:
+        result = analyze_video(args.video_path, annotated_dir=args.annotated_dir)
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    json.dump(result, sys.stdout)
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
