@@ -2,6 +2,7 @@ import os
 import time
 import urllib.request
 from pathlib import Path
+from typing import Union
 
 os.environ.setdefault("MPLCONFIGDIR", str((Path.cwd() / ".mplconfig").resolve()))
 
@@ -38,7 +39,9 @@ POSE_MODEL_URL = (
 def ensure_model(model_path: Path, model_url: str) -> None:
     if model_path.exists():
         return
+
     model_path.parent.mkdir(parents=True, exist_ok=True)
+
     try:
         urllib.request.urlretrieve(model_url, model_path)
     except Exception as exc:
@@ -61,6 +64,7 @@ def create_detectors():
             ),
             min_detection_confidence=0.5,
         )
+
         pose_options = vision.PoseLandmarkerOptions(
             base_options=python.BaseOptions(
                 model_asset_path=str(POSE_MODEL_PATH),
@@ -73,17 +77,22 @@ def create_detectors():
 
         face = vision.FaceDetector.create_from_options(face_options)
         pose = vision.PoseLandmarker.create_from_options(pose_options)
+
         return "tasks", face, pose, ""
+
     except Exception as exc:
         # Some macOS/headless builds fail to initialize Task graphs due to GL
         # service requirements. Fall back to OpenCV pretrained detectors.
         face = cv2.CascadeClassifier(
             str(Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml")
         )
+
         pose = cv2.HOGDescriptor()
         pose.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
+
         if face.empty():
             raise RuntimeError("OpenCV face cascade failed to load.") from exc
+
         return "opencv", face, pose, str(exc)
 
 
@@ -92,18 +101,23 @@ POSE_CONNECTIONS = pose_landmarker.PoseLandmarksConnections.POSE_LANDMARKS
 
 def draw_pose_landmarks(image_bgr, pose_landmarks):
     height, width = image_bgr.shape[:2]
+
     for connection in POSE_CONNECTIONS:
         start_lm = pose_landmarks[connection.start]
         end_lm = pose_landmarks[connection.end]
+
         if start_lm.visibility < 0.5 or end_lm.visibility < 0.5:
             continue
+
         start_xy = (int(start_lm.x * width), int(start_lm.y * height))
         end_xy = (int(end_lm.x * width), int(end_lm.y * height))
+
         cv2.line(image_bgr, start_xy, end_xy, (0, 255, 0), 2)
 
     for landmark in pose_landmarks:
         if landmark.visibility < 0.5:
             continue
+
         point = (int(landmark.x * width), int(landmark.y * height))
         cv2.circle(image_bgr, point, 3, (0, 140, 255), -1)
 
@@ -134,91 +148,233 @@ def _compute_aggregates(samples: list[dict], top_k: int = 5) -> dict:
     }
 
 
-def analyze_zoom_segment(video_path: str) -> dict:
-    t0 = time.perf_counter()
-    cap = cv2.VideoCapture(video_path)
-    fps = cap.get(cv2.CAP_PROP_FPS)
+def _load_video(path: Union[str, Path]):
+    path = Path(path)
+    cap = cv2.VideoCapture(str(path))
 
-    backend, face_det, pose_det, setup_error = create_detectors()
+    if not cap.isOpened():
+        raise ValueError(f"Could not open video: {path}")
 
-    sec = 0
-    samples = []
-    annotated_images = []
+    fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
 
-    while True:
-        cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000)
+    return cap, fps
+
+
+def _sample_frames(cap, start_s: float, end_s: float, sample_hz: float):
+    """Yield (timestamp_s, frame_bgr) tuples within [start_s, end_s)."""
+    if sample_hz <= 0:
+        raise ValueError("sample_hz must be > 0")
+
+    step_s = 1.0 / sample_hz
+    sec = start_s
+
+    while sec < end_s:
+        cap.set(cv2.CAP_PROP_POS_MSEC, sec * 1000.0)
+
         ok, frame_bgr = cap.read()
-        if not ok:
+        if not ok or frame_bgr is None:
             break
 
-        t_frame0 = time.perf_counter()
-        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
-        annotated = frame_bgr.copy()
+        yield sec, frame_bgr
+        sec += step_s
 
-        if backend == "tasks":
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
-            face_res = face_det.detect(mp_image)
-            pose_res = pose_det.detect(mp_image)
-            has_face = bool(face_res.detections)
-            has_pose = bool(pose_res.pose_landmarks)
-            if has_pose:
-                draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
-        else:
-            gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-            face_boxes = face_det.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
-            pose_boxes, _ = pose_det.detectMultiScale(
-                frame_bgr, winStride=(8, 8), padding=(8, 8), scale=1.05
-            )
-            has_face = len(face_boxes) > 0
-            has_pose = len(pose_boxes) > 0
-            for (x, y, w, h) in pose_boxes:
-                cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
 
-        t_frame1 = time.perf_counter()
+def _process_frame(frame_bgr, backend, face, pose):
+    t_frame0 = time.perf_counter()
 
-        samples.append(
-            {
-                "sec": sec,
-                "frame_ms": (t_frame1 - t_frame0) * 1000,
-                "has_face": has_face,
-                "has_pose": has_pose,
-            }
-        )
-        annotated_images.append(annotated)
-        sec += 1
+    blendshapes = {}
+    annotated = frame_bgr.copy()
 
     if backend == "tasks":
-        face_det.close()
-        pose_det.close()
-    cap.release()
+        frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame_rgb)
 
-    t1 = time.perf_counter()
+        face_res = face.detect(mp_image)
+        pose_res = pose.detect(mp_image)
+
+        has_face = bool(face_res.detections)
+        has_pose = bool(pose_res.pose_landmarks)
+
+        if has_pose:
+            draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
+
+        # FaceDetector does not return blendshapes; switch to FaceLandmarker to add them.
+        blendshapes = {}
+
+    else:
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+
+        face_boxes = face.detectMultiScale(
+            gray,
+            scaleFactor=1.1,
+            minNeighbors=5,
+        )
+
+        pose_boxes, _ = pose.detectMultiScale(
+            frame_bgr,
+            winStride=(8, 8),
+            padding=(8, 8),
+            scale=1.05,
+        )
+
+        has_face = len(face_boxes) > 0
+        has_pose = len(pose_boxes) > 0
+        blendshapes = {}
+
+        for (x, y, w, h) in pose_boxes:
+            cv2.rectangle(annotated, (x, y), (x + w, y + h), (0, 255, 0), 2)
+
+    t_frame1 = time.perf_counter()
+    frame_ms = (t_frame1 - t_frame0) * 1000.0
+
+    return has_face, has_pose, blendshapes, frame_ms, annotated
+
+
+def analyze_zoom_segment(
+    video_path: Union[str, Path],
+    *,
+    max_duration_s: float = 300.0,
+    start_offset_s: float = 0.0,
+    sample_hz: float = 1.0,
+) -> dict:
+    """Analyze a video segment with a configurable duration cap.
+
+    Parameters
+    ----------
+    video_path : str or Path
+        Path to the video file to analyze.
+    max_duration_s : float
+        Hard cap on how many seconds of video to analyze (default 300 = 5 min).
+    start_offset_s : float
+        Where in the video to begin analysis (default 0.0 = start).
+    sample_hz : float
+        Frames to sample per second (default 1.0 = one frame/sec).
+
+    Returns
+    -------
+    dict with keys ``meta``, ``samples``, ``aggregates``, ``annotated_images``.
+    """
+    if max_duration_s <= 0:
+        raise ValueError("max_duration_s must be positive")
+    if start_offset_s < 0:
+        raise ValueError("start_offset_s must be non-negative")
+
+    wall_start = time.perf_counter()
+
+    video_path = Path(video_path)
+    cap = None
+    fps = 0.0
+    backend = "unknown"
+    setup_error = ""
+    samples = []
+    annotated_images = []
+    effective_duration_s = 0.0
+    video_duration_s = None
+
+    try:
+        cap, fps = _load_video(video_path)
+
+        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        if frame_count > 0 and fps > 0:
+            video_duration_s = frame_count / fps
+        # If unknown, fall back to inf so the loop runs until EOF
+        _vd = video_duration_s if video_duration_s is not None else float("inf")
+
+        if start_offset_s >= _vd:
+            raise ValueError(
+                f"start_offset_s ({start_offset_s}) exceeds video length "
+                f"({_vd:.1f}s)"
+            )
+
+        backend, face, pose, setup_error = create_detectors()
+
+        start_s = max(0.0, start_offset_s)
+        end_s = min(_vd, start_s + max_duration_s)
+        effective_duration_s = max(0.0, end_s - start_s)
+
+        try:
+            for sec, frame_bgr in _sample_frames(cap, start_s, end_s, sample_hz):
+                has_face, has_pose, blendshapes, frame_ms, annotated = _process_frame(
+                    frame_bgr,
+                    backend,
+                    face,
+                    pose,
+                )
+
+                samples.append(
+                    {
+                        "sec": sec,
+                        "frame_ms": frame_ms,
+                        "has_face": has_face,
+                        "has_pose": has_pose,
+                        "blendshapes": blendshapes,
+                    }
+                )
+                annotated_images.append(annotated)
+
+        finally:
+            if backend == "tasks":
+                face.close()
+                pose.close()
+
+    except Exception as exc:
+        setup_error = str(exc)
+
+    finally:
+        if cap is not None:
+            cap.release()
+
+    total_wall_s = time.perf_counter() - wall_start
 
     return {
+        "meta": {
+            "video_path": str(video_path),
+            "backend": backend,
+            "fps": fps,
+            "video_duration_s": video_duration_s,
+            "effective_duration_s": round(effective_duration_s, 2),
+            "max_duration_s": max_duration_s,
+            "start_offset_s": start_offset_s,
+            "sample_hz": sample_hz,
+            "sample_count": len(samples),
+            "total_wall_s": round(total_wall_s, 3),
+            "setup_error": setup_error or None,
+        },
         "samples": samples,
         "aggregates": _compute_aggregates(samples),
         "annotated_images": annotated_images,
-        "backend": backend,
-        "setup_error": setup_error,
-        "fps": fps,
-        "total_time_s": t1 - t0,
     }
 
 
 if __name__ == "__main__":
-    result = analyze_zoom_segment("example_video3.mov")
+    import argparse
+    import json
+    import sys
 
-    samples = result["samples"]
-    aggregates = result["aggregates"]
+    parser = argparse.ArgumentParser(description="Analyze a video segment")
+    parser.add_argument("video", help="Path to the video file")
+    parser.add_argument("--max-duration", type=float, default=300.0,
+                        help="Max seconds to analyze (default: 300)")
+    parser.add_argument("--start-offset", type=float, default=0.0,
+                        help="Start offset in seconds (default: 0)")
+    parser.add_argument("--sample-hz", type=float, default=1.0,
+                        help="Frames per second to sample (default: 1)")
+    parser.add_argument("--save-images", action="store_true",
+                        help="Write annotated frames as img0.png, img1.png, …")
+    args = parser.parse_args()
 
-    print(f"backend={result['backend']} sampled_seconds={len(samples)} total_time={result['total_time_s']:.3f}s")
-    print(f"annotated_images_count={len(result['annotated_images'])}")
-    print(f"face_visibility_ratio={aggregates.get('face_visibility_ratio', 'n/a'):.2f}")
-    print(f"pose_visibility_ratio={aggregates.get('pose_visibility_ratio', 'n/a'):.2f}")
-    print(f"top_blendshapes={aggregates.get('top_blendshapes', [])}")
+    result = analyze_zoom_segment(
+        args.video,
+        max_duration_s=args.max_duration,
+        start_offset_s=args.start_offset,
+        sample_hz=args.sample_hz,
+    )
 
-    for i, im in enumerate(result["annotated_images"]):
-        cv2.imwrite(f"img{i}.png", im)
+    output = {k: v for k, v in result.items() if k != "annotated_images"}
+    json.dump(output, sys.stdout, indent=2)
+    print(f"\nsampled_frames={len(result['samples'])}")
 
-    if result["setup_error"]:
-        print(f"tasks_setup_error={result['setup_error']}")
+    if args.save_images:
+        for i, im in enumerate(result["annotated_images"]):
+            cv2.imwrite(f"img{i}.png", im)
+        print(f"annotated_images_count={len(result['annotated_images'])}")
