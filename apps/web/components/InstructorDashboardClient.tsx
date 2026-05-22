@@ -10,6 +10,7 @@ export type InstructorUploadRow = {
   sourceStoragePath: string
   uploadedAt: string | null
   sourceType: 'pdf' | 'video'
+  durationSeconds?: number
   feedbackStatus:
     | 'ready'
     | 'not_started'
@@ -114,6 +115,9 @@ export default function InstructorDashboardClient({
   const [isUploadingPdf, setIsUploadingPdf] = useState(false)
   const [isUploadingVideo, setIsUploadingVideo] = useState(false)
   const [generatingLessonPlanId, setGeneratingLessonPlanId] = useState<string | null>(null)
+  const [videoTrimInputs, setVideoTrimInputs] = useState<
+    Record<string, { startMin: string; startSec: string; endMin: string; endSec: string }>
+  >({})
 
   const readyCount = rows.filter((row) => row.feedbackStatus === 'ready').length
 
@@ -231,6 +235,7 @@ export default function InstructorDashboardClient({
       const fileId = payload.file_id
       const fileName = file.name
       const storagePath = `${instructorId}/${fileId}`
+      const durationSeconds = payload.duration_seconds
 
       setRows((currentRows) => [
         {
@@ -239,6 +244,7 @@ export default function InstructorDashboardClient({
           sourceStoragePath: storagePath,
           uploadedAt: new Date().toISOString(),
           sourceType: 'video',
+          durationSeconds,
           feedbackStatus: 'not_started',
           feedbackId: null,
           errorMessage: null,
@@ -264,6 +270,20 @@ export default function InstructorDashboardClient({
     try {
       setGeneratingLessonPlanId(row.fileId)
 
+      const trim = videoTrimInputs[row.fileId]
+      const toSeconds = (min: string | undefined, sec: string | undefined) => {
+        const m = min !== '' && min !== undefined ? Number(min) : 0
+        const s = sec !== '' && sec !== undefined ? Number(sec) : 0
+        return m * 60 + s
+      }
+      const hasStart = (trim?.startMin ?? '') !== '' || (trim?.startSec ?? '') !== ''
+      const hasEnd = (trim?.endMin ?? '') !== '' || (trim?.endSec ?? '') !== ''
+      // Default start to 0, default end to the full video duration if known
+      const startSeconds = hasStart ? toSeconds(trim?.startMin, trim?.startSec) : 0
+      const endSeconds = hasEnd
+        ? toSeconds(trim?.endMin, trim?.endSec)
+        : row.durationSeconds
+
       const requestBody =
         row.sourceType === 'video'
           ? {
@@ -271,6 +291,8 @@ export default function InstructorDashboardClient({
               lessonPlanId: row.fileId,
               source_type: 'video',
               videoFileId: row.fileId,
+              ...(startSeconds !== undefined ? { startSeconds } : {}),
+              ...(endSeconds !== undefined ? { endSeconds } : {}),
             }
           : {
               instructorId,
@@ -485,6 +507,79 @@ export default function InstructorDashboardClient({
                       </span>
                     </td>
                     <td>
+                      {row.sourceType === 'video' && !isGenerating && !isVideoInProgress && (
+                        <div className="dashboard-trim-inputs">
+                          <span className="dashboard-trim-label">Start</span>
+                          <input
+                            type="number"
+                            min="0"
+                            placeholder="0"
+                            aria-label="Start minutes"
+                            value={videoTrimInputs[row.fileId]?.startMin ?? ''}
+                            onChange={(e) =>
+                              setVideoTrimInputs((prev) => ({
+                                ...prev,
+                                [row.fileId]: { ...prev[row.fileId], startMin: e.target.value },
+                              }))
+                            }
+                          />
+                          <span className="dashboard-trim-unit">m</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max="59"
+                            placeholder="0"
+                            aria-label="Start seconds"
+                            value={videoTrimInputs[row.fileId]?.startSec ?? ''}
+                            onChange={(e) =>
+                              setVideoTrimInputs((prev) => ({
+                                ...prev,
+                                [row.fileId]: { ...prev[row.fileId], startSec: e.target.value },
+                              }))
+                            }
+                          />
+                          <span className="dashboard-trim-unit">s</span>
+                          <span className="dashboard-trim-separator">→</span>
+                          <span className="dashboard-trim-label">End</span>
+                          <input
+                            type="number"
+                            min="0"
+                            placeholder={
+                              row.durationSeconds !== undefined
+                                ? String(Math.floor(row.durationSeconds / 60))
+                                : '–'
+                            }
+                            aria-label="End minutes"
+                            value={videoTrimInputs[row.fileId]?.endMin ?? ''}
+                            onChange={(e) =>
+                              setVideoTrimInputs((prev) => ({
+                                ...prev,
+                                [row.fileId]: { ...prev[row.fileId], endMin: e.target.value },
+                              }))
+                            }
+                          />
+                          <span className="dashboard-trim-unit">m</span>
+                          <input
+                            type="number"
+                            min="0"
+                            max="59"
+                            placeholder={
+                              row.durationSeconds !== undefined
+                                ? String(Math.round(row.durationSeconds % 60))
+                                : '–'
+                            }
+                            aria-label="End seconds"
+                            value={videoTrimInputs[row.fileId]?.endSec ?? ''}
+                            onChange={(e) =>
+                              setVideoTrimInputs((prev) => ({
+                                ...prev,
+                                [row.fileId]: { ...prev[row.fileId], endSec: e.target.value },
+                              }))
+                            }
+                          />
+                          <span className="dashboard-trim-unit">s</span>
+                        </div>
+                      )}
                       <div className="dashboard-row-actions">
                         <button
                           type="button"

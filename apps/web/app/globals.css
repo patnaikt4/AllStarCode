@@ -847,6 +847,48 @@ button[type='submit']:hover {
   flex-wrap: wrap;
 }
 
+.dashboard-trim-inputs {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+
+.dashboard-trim-inputs input[type='number'] {
+  width: 48px;
+  padding: 3px 5px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  text-align: center;
+  -moz-appearance: textfield;
+}
+
+.dashboard-trim-inputs input[type='number']::-webkit-inner-spin-button,
+.dashboard-trim-inputs input[type='number']::-webkit-outer-spin-button {
+  opacity: 1;
+}
+
+.dashboard-trim-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #444;
+  margin-right: 2px;
+}
+
+.dashboard-trim-unit {
+  font-size: 0.72rem;
+  color: #777;
+  margin-right: 2px;
+}
+
+.dashboard-trim-separator {
+  font-size: 0.75rem;
+  color: #aaa;
+  margin: 0 4px;
+}
+
 @media (max-width: 960px) {
   .instructor-dashboard-page {
     grid-template-columns: 1fr;
