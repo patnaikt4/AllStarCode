@@ -209,7 +209,7 @@ export default function InstructorChatWorkspace({ userEmail, fileId, fileName }:
       <aside className="instructor-sidebar">
         <div className="sidebar-header">
           <a href="/dashboard/instructor" className="sidebar-brand-link">
-            ALLSTARCODE
+            AllStarCode
           </a>
           <button type="button" className="sidebar-new-btn" onClick={handleNewChat}>
             <span>+</span> New Chat
