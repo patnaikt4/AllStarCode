@@ -38,15 +38,18 @@ Keep the tone supportive, specific, and practical.
 
 Be succinct: prefer tight bullets over long prose. State the insight and one concrete fix per bullet; avoid repeating the lesson plan back. Skip lengthy quoted examples unless a single short phrase illustrates the point.`
 
-const VIDEO_FEEDBACK_SYSTEM_PROMPT = `You are an instructional coach reviewing a transcript of a teaching session recorded by an AllStarCode instructor.
+const VIDEO_FEEDBACK_SYSTEM_PROMPT = `You are an instructional coach reviewing a teaching session recorded by an AllStarCode instructor.
 
-Your job is to give concrete, constructive feedback that helps the instructor improve their verbal delivery and content alignment.
+You have access to both a transcript of what was said and, when available, computer vision metrics about the instructor's physical presence (face visibility, body visibility, and dominant facial expressions sampled from the video).
+
+Your job is to give concrete, constructive feedback that helps the instructor improve their delivery and content alignment.
 
 Prioritize:
 - alignment with AllStarCode learning objectives and curriculum expectations
 - clarity of verbal explanations and instructions given to students
 - pacing, sequencing, and transitions throughout the session
 - student engagement and participation cues
+- physical presence and delivery energy when CV data is available (on-camera time, visible engagement)
 - actionable changes the instructor can apply in the next session
 
 Keep the tone supportive, specific, and practical.
@@ -57,49 +60,63 @@ function buildFeedbackPrompt({
   curriculumContext,
   lessonPlanText,
   source = 'written_lesson_plan',
+  cvMetrics,
 }: {
   curriculumContext: string
   lessonPlanText: string
   source?: FeedbackSource
+  cvMetrics?: string
 }) {
   const isVideo = source === 'video_transcript'
   const contentLabel = isVideo ? 'video transcript' : 'lesson plan'
   const contentHeader = isVideo ? 'Video transcript' : 'Lesson plan text'
 
-  return `
-Review this ${contentLabel} against the AllStarCode curriculum context provided below.
+  const hasCurriculumContext = curriculumContext && curriculumContext !== '[Placeholder: curriculum context]'
 
-If the curriculum context is placeholder text or empty, respond only with a brief message stating that this ${contentLabel} does not appear to cover topics from the AllStarCode CS curriculum, and cannot be reviewed.
+  const curriculumSection = hasCurriculumContext
+    ? `Curriculum context:\n${curriculumContext}\n\n`
+    : ''
 
-If curriculum context is provided, your feedback must be grounded in that specific AllStarCode curriculum. Focus on:
+  const cvSection = isVideo && cvMetrics
+    ? `${cvMetrics}\n\n`
+    : ''
+
+  const curriculumInstruction = hasCurriculumContext
+    ? `Your feedback must be grounded in the AllStarCode curriculum context provided below. Focus on:
 1. Which AllStarCode topics this ${contentLabel} covers, partially covers, or misses entirely
 2. Where the ${contentLabel}'s approach, vocabulary, or activities diverge from AllStarCode's curriculum
 3. Specific changes to better align with AllStarCode's content and teaching expectations
 4. Clarity of ${isVideo ? 'spoken explanations, pacing, and student engagement' : 'directions, pacing, and student engagement'} relative to AllStarCode's style
-5. Concrete next steps to bring the ${isVideo ? 'session' : 'lesson'} into closer alignment
+5. Concrete next steps to bring the ${isVideo ? 'session' : 'lesson'} into closer alignment${isVideo && cvMetrics ? '\n6. Physical presence and on-camera engagement based on the CV data above' : ''}`
+    : `No curriculum context is available. Give general instructional coaching feedback on this ${contentLabel}. Focus on:
+1. Clarity of learning objectives and student outcomes
+2. ${isVideo ? 'Pacing, verbal clarity, and student engagement cues' : 'Pacing, sequencing, and student engagement'}
+3. Instructional design quality and accessibility
+4. Concrete improvements the instructor can make next${isVideo && cvMetrics ? '\n5. Physical presence and on-camera engagement based on the CV data above' : ''}`
 
-Do not give generic CS teaching advice. All feedback must reference what AllStarCode's curriculum actually covers.
+  return `
+Review this ${contentLabel} and provide instructional coaching feedback.
+
+${curriculumInstruction}
 
 Return:
 - A brief overall assessment (a short paragraph, not an essay)
 - 4 to 6 actionable feedback bullets: each bullet = one line title or bold lead, then at most 2–3 short sentences or sub-bullets—no multi-paragraph items
 - A short "Suggested revisions" section (3–5 tight bullets for next steps)
 
-Style: succinct throughout. Do not pad with restating syllabus content; get to recommendations quickly.
+Style: succinct throughout. Get to recommendations quickly.
 
-Curriculum context:
-${curriculumContext}
-
-${contentHeader}:
+${cvSection}${curriculumSection}${contentHeader}:
 ${lessonPlanText}
 `.trim()
 }
 
 export async function getFeedbackFromRag(
   extractedLessonPlanText: string,
-  options?: { source?: FeedbackSource }
+  options?: { source?: FeedbackSource; cvMetrics?: string }
 ): Promise<string> {
   const source = options?.source ?? 'written_lesson_plan'
+  const cvMetrics = options?.cvMetrics
   const lessonPlanText = stripInvalidUtf16Scalars(extractedLessonPlanText).trim()
 
   if (!lessonPlanText) {
@@ -121,6 +138,7 @@ export async function getFeedbackFromRag(
       curriculumContext,
       lessonPlanText,
       source,
+      cvMetrics,
     }),
     max_output_tokens: getMaxOutputTokens(),
   })

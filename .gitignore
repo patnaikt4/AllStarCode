@@ -143,4 +143,8 @@ __pycache__/
 *.pyc
 .venv/
 
-.venv/
+# MediaPipe downloaded model files and matplotlib runtime dir
+CvResearch/models/
+CvResearch/.mplconfig/
+apps/web/models/
+apps/web/.mplconfig/

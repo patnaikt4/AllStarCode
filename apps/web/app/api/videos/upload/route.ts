@@ -136,6 +136,14 @@ export async function POST(request: Request) {
     return new Response('file must be an mp4, mov, or webm video', { status: 400 })
   }
 
+  const MAX_FILE_BYTES = 500 * 1024 * 1024 // 500 MB — adjust to match your Supabase bucket limit
+  if (file.size > MAX_FILE_BYTES) {
+    return new Response(
+      `video file is too large (${Math.round(file.size / 1024 / 1024)} MB). Maximum allowed is ${MAX_FILE_BYTES / 1024 / 1024} MB.`,
+      { status: 413 }
+    )
+  }
+
   // check magic bytes so we're not trusting content-type alone
   const header = new Uint8Array(await file.slice(0, 32).arrayBuffer())
   const inferredMimeType = inferVideoMimeType(header)

@@ -31,13 +31,12 @@ export async function middleware(request: NextRequest) {
     }
   )
 
-  // getUser() validates the session on every request
-  const {
-    data: { user },
-  } = await supabase.auth.getUser()
+  // getSession() reads the JWT from the cookie without a network call,
+  // which avoids Edge Runtime fetch failures. Page/route handlers call
+  // getUser() (server-validated) for actual security checks.
+  const { data: { session } } = await supabase.auth.getSession()
 
-  // If there is no valid user, redirect to /login
-  if (!user) {
+  if (!session) {
     const loginUrl = new URL('/login', request.url)
     return NextResponse.redirect(loginUrl)
   }

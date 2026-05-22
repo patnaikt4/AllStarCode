@@ -16,19 +16,19 @@ from mediapipe.tasks.python.vision import pose_landmarker
 MODEL_DIR = Path(os.environ.get("MP_MODEL_DIR", "models"))
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-DEFAULT_FACE_MODEL_PATH = MODEL_DIR / "blaze_face_short_range.tflite"
+DEFAULT_FACE_LANDMARKER_PATH = MODEL_DIR / "face_landmarker.task"
 DEFAULT_POSE_MODEL_PATH = MODEL_DIR / "pose_landmarker_lite.task"
 
-FACE_MODEL_PATH = Path(
-    os.environ.get("MP_FACE_MODEL_PATH", str(DEFAULT_FACE_MODEL_PATH))
+FACE_LANDMARKER_PATH = Path(
+    os.environ.get("MP_FACE_LANDMARKER_PATH", str(DEFAULT_FACE_LANDMARKER_PATH))
 )
 POSE_MODEL_PATH = Path(
     os.environ.get("MP_POSE_MODEL_PATH", str(DEFAULT_POSE_MODEL_PATH))
 )
 
-FACE_MODEL_URL = (
-    "https://storage.googleapis.com/mediapipe-models/face_detector/"
-    "blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+FACE_LANDMARKER_URL = (
+    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
+    "face_landmarker/float16/1/face_landmarker.task"
 )
 POSE_MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
@@ -54,15 +54,18 @@ def ensure_model(model_path: Path, model_url: str) -> None:
 
 def create_detectors():
     try:
-        ensure_model(FACE_MODEL_PATH, FACE_MODEL_URL)
+        ensure_model(FACE_LANDMARKER_PATH, FACE_LANDMARKER_URL)
         ensure_model(POSE_MODEL_PATH, POSE_MODEL_URL)
 
-        face_options = vision.FaceDetectorOptions(
+        face_options = vision.FaceLandmarkerOptions(
             base_options=python.BaseOptions(
-                model_asset_path=str(FACE_MODEL_PATH),
+                model_asset_path=str(FACE_LANDMARKER_PATH),
                 delegate=python.BaseOptions.Delegate.CPU,
             ),
-            min_detection_confidence=0.5,
+            running_mode=vision.RunningMode.IMAGE,
+            output_face_blendshapes=True,
+            min_face_detection_confidence=0.5,
+            min_face_presence_confidence=0.5,
         )
 
         pose_options = vision.PoseLandmarkerOptions(
@@ -75,7 +78,7 @@ def create_detectors():
             min_tracking_confidence=0.5,
         )
 
-        face = vision.FaceDetector.create_from_options(face_options)
+        face = vision.FaceLandmarker.create_from_options(face_options)
         pose = vision.PoseLandmarker.create_from_options(pose_options)
 
         return "tasks", face, pose, ""
@@ -192,14 +195,16 @@ def _process_frame(frame_bgr, backend, face, pose):
         face_res = face.detect(mp_image)
         pose_res = pose.detect(mp_image)
 
-        has_face = bool(face_res.detections)
+        has_face = bool(face_res.face_landmarks)
         has_pose = bool(pose_res.pose_landmarks)
 
         if has_pose:
             draw_pose_landmarks(annotated, pose_res.pose_landmarks[0])
 
-        # FaceDetector does not return blendshapes; switch to FaceLandmarker to add them.
-        blendshapes = {}
+        blendshapes = (
+            {b.category_name: b.score for b in face_res.face_blendshapes[0]}
+            if face_res.face_blendshapes else {}
+        )
 
     else:
         gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
@@ -372,7 +377,7 @@ if __name__ == "__main__":
 
     output = {k: v for k, v in result.items() if k != "annotated_images"}
     json.dump(output, sys.stdout, indent=2)
-    print(f"\nsampled_frames={len(result['samples'])}")
+    print(f"sampled_frames={len(result['samples'])}", file=sys.stderr)
 
     if args.save_images:
         for i, im in enumerate(result["annotated_images"]):

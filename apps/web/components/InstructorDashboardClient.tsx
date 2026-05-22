@@ -338,30 +338,35 @@ export default function InstructorDashboardClient({
           return
         }
 
-        const payload = await getResponsePayload<
-          Array<{
-            id: number
-            status: 'uploaded' | 'transcribing' | 'generating' | 'complete' | 'failed'
-            source_type?: 'pdf' | 'video'
-            error_message?: string | null
+        const payload = await getResponsePayload<{
+          items: Array<{
+            id: string
+            status: string
           }>
-        >(response)
+        }>(response)
+
+        const items = payload?.items
+        if (!Array.isArray(items)) {
+          return
+        }
 
         setRows((currentRows) =>
           currentRows.map((row) => {
-            if (row.sourceType !== 'video' || !row.feedbackId) {
+            if (!row.feedbackId) {
               return row
             }
 
-            const match = payload.find((item) => item.id === row.feedbackId)
+            const match = items.find((item) => item.id === row.feedbackId)
             if (!match) {
               return row
             }
 
             return {
               ...row,
-              feedbackStatus: match.status === 'complete' ? 'ready' : match.status,
-              errorMessage: match.error_message ?? null,
+              feedbackStatus:
+                match.status === 'complete' || match.status === 'ready'
+                  ? 'ready'
+                  : (match.status as InstructorUploadRow['feedbackStatus']),
             }
           })
         )

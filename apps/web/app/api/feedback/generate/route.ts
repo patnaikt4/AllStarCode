@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
+import { analyzeVideoCV, formatCvMetrics } from '@/lib/feedback/analyze-video-cv'
 import { getFeedbackStorageBucket } from '@/lib/feedback/feedback-storage-bucket'
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
@@ -516,8 +517,28 @@ export async function POST(request: Request) {
       }
 
       let transcript: string
+      let cvMetrics: string | undefined
+
       try {
-        transcript = await transcribeVideoBuffer({ buffer: videoBuffer, extension })
+        const [transcriptResult, cvResult] = await Promise.allSettled([
+          transcribeVideoBuffer({ buffer: videoBuffer, extension }),
+          analyzeVideoCV(videoBuffer, extension),
+        ])
+
+        if (transcriptResult.status === 'rejected') {
+          const message =
+            transcriptResult.reason instanceof Error
+              ? transcriptResult.reason.message
+              : 'Transcription failed.'
+          console.error('Video transcription failed:', transcriptResult.reason)
+          return createErrorResponse(500, `Transcription failed: ${message}`)
+        }
+
+        transcript = transcriptResult.value
+
+        if (cvResult.status === 'fulfilled' && cvResult.value) {
+          cvMetrics = formatCvMetrics(cvResult.value)
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Transcription failed.'
         console.error('Video transcription failed:', error)
@@ -528,7 +549,7 @@ export async function POST(request: Request) {
         return createErrorResponse(400, 'Video transcript is empty.')
       }
 
-      const feedback = await getFeedbackFromRag(transcript, { source: 'video_transcript' })
+      const feedback = await getFeedbackFromRag(transcript, { source: 'video_transcript', cvMetrics })
 
       const feedbackPdf = await renderFeedbackPdf({
         title: 'AllStarCode Video Session Feedback',
