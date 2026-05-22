@@ -142,10 +142,11 @@ button[type='submit']:hover {
 }
 
 .sidebar-brand {
-  font-size: 0.95rem;
-  font-weight: 700;
+  font-size: 0.85rem;
+  font-weight: 800;
   color: #fff;
-  letter-spacing: -0.01em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   margin-bottom: 14px;
 }
 
@@ -594,9 +595,9 @@ button[type='submit']:hover {
 }
 
 .dashboard-brand {
-  font-size: 1rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
