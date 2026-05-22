@@ -2,15 +2,16 @@ import { randomUUID } from 'node:crypto'
 import path from 'node:path'
 
 import { analyzeVideoCV, formatCvMetrics } from '@/lib/feedback/analyze-video-cv'
+import { analyzeScreenContent, formatScreenTimeline } from '@/lib/feedback/analyze-screen-content'
+import { extractVideoFrames } from '@/lib/feedback/extract-video-frames'
 import { getFeedbackStorageBucket } from '@/lib/feedback/feedback-storage-bucket'
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
 import { trimVideoBuffer, validateTrimRange } from '@/lib/feedback/trim-video'
-import { transcribeVideoBuffer } from '@/lib/feedback/transcribe-video'
+import { transcribeVideoBuffer, formatTimestampedTranscript } from '@/lib/feedback/transcribe-video'
 
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
 import { createClient } from '@/lib/supabase/server'
-import PDFDocument from 'pdfkit'
 export const runtime = 'nodejs'
 
 const LESSON_PLAN_BUCKET = 'documents'
@@ -25,6 +26,7 @@ type GenerateFeedbackRequest = {
   message?: unknown
   source_type?: unknown
   videoFileId?: unknown
+  videoType?: unknown
   startSeconds?: unknown
   endSeconds?: unknown
 }
@@ -181,61 +183,6 @@ async function insertChatMessage(params: {
       `Failed to save chat message: ${error.message}`
     )
   }
-}
-
-async function createMockLessonPlanPdf(params: {
-  instructorId: string
-  lessonPlanId: string
-}) {
-  const { instructorId, lessonPlanId } = params
-
-  return await new Promise<Buffer>((resolve, reject) => {
-    const doc = new PDFDocument({
-      margin: 56,
-      size: 'LETTER',
-      info: {
-        Title: `Mock lesson plan ${lessonPlanId}`,
-        Author: 'AllStarCode',
-      },
-    })
-
-    const chunks: Buffer[] = []
-
-    doc.on('data', (chunk: Buffer) => {
-      chunks.push(chunk)
-    })
-
-    doc.on('end', () => {
-      resolve(Buffer.concat(chunks))
-    })
-
-    doc.on('error', reject)
-
-    doc.fontSize(18).text('AllStarCode Lesson Plan')
-    doc.moveDown(0.5)
-    doc
-      .fontSize(10)
-      .fillColor('#666666')
-      .text(`Instructor ID: ${instructorId}`)
-      .text(`Lesson Plan ID: ${lessonPlanId}`)
-
-    doc.moveDown()
-    doc.fillColor('#111111')
-    doc.fontSize(12).text(
-      [
-        'Objective: Students will explain variables and write simple JavaScript assignments.',
-        'Opening: Begin with a relatable warm-up that asks students how computers remember information.',
-        'Mini-lesson: Model variable declarations, naming conventions, and string versus number examples.',
-        'Guided practice: Students follow along and predict outputs before running code.',
-        'Independent practice: Students create a small profile card program using at least three variables.',
-        'Assessment: Exit ticket asking students to define a variable and explain when to use one.',
-        'Differentiation: Provide sentence frames, pair programming, and extension prompts for advanced learners.',
-      ].join('\n\n'),
-      { lineGap: 4 }
-    )
-
-    doc.end()
-  })
 }
 
 
@@ -397,6 +344,12 @@ export async function POST(request: Request) {
     const sourceType = body.source_type === 'video' ? 'video' : 'pdf'
     const videoFileId =
       typeof body.videoFileId === 'string' ? body.videoFileId.trim() : ''
+    const videoType: 'webcam' | 'screen' | 'combined' =
+      body.videoType === 'webcam'
+        ? 'webcam'
+        : body.videoType === 'screen'
+          ? 'screen'
+          : 'combined'
 
     const trimRangeResult = validateTrimRange(body.startSeconds, body.endSeconds)
     // If one of startSeconds/endSeconds is provided but the range is invalid, reject early
@@ -541,11 +494,16 @@ export async function POST(request: Request) {
 
       let transcript: string
       let cvMetrics: string | undefined
+      let screenTimeline: string | undefined
+
+      const runCv = videoType !== 'screen'
+      const runScreenAnalysis = videoType !== 'webcam'
 
       try {
-        const [transcriptResult, cvResult] = await Promise.allSettled([
+        const [transcriptResult, cvResult, framesResult] = await Promise.allSettled([
           transcribeVideoBuffer({ buffer: videoBuffer, extension }),
-          analyzeVideoCV(videoBuffer, extension),
+          runCv ? analyzeVideoCV(videoBuffer, extension) : Promise.resolve(null),
+          runScreenAnalysis ? extractVideoFrames(videoBuffer, extension) : Promise.resolve([]),
         ])
 
         if (transcriptResult.status === 'rejected') {
@@ -557,10 +515,21 @@ export async function POST(request: Request) {
           return createErrorResponse(500, `Transcription failed: ${message}`)
         }
 
-        transcript = transcriptResult.value
+        const transcriptData = transcriptResult.value
+        transcript =
+          transcriptData.segments.length > 0
+            ? formatTimestampedTranscript(transcriptData.segments)
+            : transcriptData.text
 
-        if (cvResult.status === 'fulfilled' && cvResult.value) {
+        if (runCv && cvResult.status === 'fulfilled' && cvResult.value) {
           cvMetrics = formatCvMetrics(cvResult.value)
+        }
+
+        if (runScreenAnalysis && framesResult.status === 'fulfilled' && framesResult.value.length > 0) {
+          const screenResult = await analyzeScreenContent(framesResult.value)
+          if (screenResult) {
+            screenTimeline = formatScreenTimeline(screenResult)
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Transcription failed.'
@@ -568,11 +537,14 @@ export async function POST(request: Request) {
         return createErrorResponse(500, `Transcription failed: ${message}`)
       }
 
-      if (!transcript) {
-        return createErrorResponse(400, 'Video transcript is empty.')
+      // No audio is valid — screen-only recordings have no transcript.
+      // At least one signal (transcript, CV, or screen) must be present.
+      if (!transcript && !cvMetrics && !screenTimeline) {
+        return createErrorResponse(400, 'No usable content found in the video (no audio, no face detected, and no screen content).')
       }
 
-      const feedback = await getFeedbackFromRag(transcript, { source: 'video_transcript', cvMetrics })
+      const feedbackInput = transcript || '[No audio — feedback is based on screen content only.]'
+      const feedback = await getFeedbackFromRag(feedbackInput, { source: 'video_transcript', cvMetrics, screenTimeline })
 
       const feedbackPdf = await renderFeedbackPdf({
         title: 'AllStarCode Video Session Feedback',

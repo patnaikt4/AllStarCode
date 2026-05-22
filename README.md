@@ -6,9 +6,42 @@ A learning platform for coding education. You'll learn everything you need to ge
 
 ## What you need before you start
 
+### Required
+
 - [Node.js](https://nodejs.org) version 18 or higher
-- Access to the Supabase API keys
+- **ffmpeg** — used for video trimming and frame extraction. Install with:
+  ```bash
+  brew install ffmpeg        # macOS
+  sudo apt install ffmpeg    # Ubuntu/Debian
+  ```
+- Access to the Supabase project API keys (URL + anon key + service role key)
+- An **OpenAI API key** — used for transcription, feedback generation, and screen analysis
 - This repository cloned to your computer
+
+### npm packages (installed automatically via `npm install`)
+
+These are declared in `package.json` and do not need to be installed separately:
+- `ffprobe-static` — used to probe video duration before upload
+- `pdfkit` — used to render feedback as a PDF
+
+### Optional — Computer Vision (facial presence analysis)
+
+The CV analysis runs a local Python script (`CvResearch/main.py`) that detects the instructor's face and body on camera. This is **non-fatal** — if it is not set up, feedback will still generate from transcription and screen analysis alone.
+
+To enable it:
+1. Install Python 3.9+
+2. `cd CvResearch && pip install -r requirements.txt` (if a requirements file exists) or follow `CvResearch/README.md`
+3. Set `CV_RESEARCH_SCRIPT_PATH` in `.env.local` if the script is not at the default path
+
+### Supabase storage buckets
+
+The following buckets must exist in your Supabase project (create them as **private** under Storage):
+
+| Bucket name | Used for |
+|---|---|
+| `documents` | Uploaded lesson plan PDFs |
+| `videos` | Uploaded lesson videos |
+| `FeedbackforLessonPlans` | Generated feedback PDFs (or set `FEEDBACK_STORAGE_BUCKET` in `.env.local` to override) |
 
 ---
 
@@ -22,6 +55,16 @@ A learning platform for coding education. You'll learn everything you need to ge
 ```
 NEXT_PUBLIC_SUPABASE_URL=paste_your_project_url_here
 NEXT_PUBLIC_SUPABASE_ANON_KEY=paste_your_anon_key_here
+SUPABASE_SERVICE_ROLE_KEY=paste_your_service_role_key_here
+
+OPENAI_API_KEY=paste_your_openai_key_here
+
+# Optional overrides
+# FEEDBACK_STORAGE_BUCKET=FeedbackforLessonPlans
+# OPENAI_FEEDBACK_MODEL=gpt-4o-mini
+# OPENAI_CHAT_MODEL=gpt-4o-mini
+# CV_RESEARCH_SCRIPT_PATH=/absolute/path/to/CvResearch/main.py
+# CV_FFMPEG_PATH=/usr/local/bin/ffmpeg
 ```
 
 ---
