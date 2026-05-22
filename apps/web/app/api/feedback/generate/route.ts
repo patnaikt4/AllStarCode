@@ -5,6 +5,7 @@ import { analyzeVideoCV, formatCvMetrics } from '@/lib/feedback/analyze-video-cv
 import { getFeedbackStorageBucket } from '@/lib/feedback/feedback-storage-bucket'
 import { getFeedbackFromRag } from '@/lib/feedback/get-feedback-from-rag'
 import { renderFeedbackPdf } from '@/lib/feedback/render-feedback-pdf'
+import { trimVideoBuffer, validateTrimRange } from '@/lib/feedback/trim-video'
 import { transcribeVideoBuffer } from '@/lib/feedback/transcribe-video'
 
 import { extractTextFromPdf } from '@/lib/lesson-plan/extract-pdf-text'
@@ -24,6 +25,8 @@ type GenerateFeedbackRequest = {
   message?: unknown
   source_type?: unknown
   videoFileId?: unknown
+  startSeconds?: unknown
+  endSeconds?: unknown
 }
 
 const VIDEO_SOURCE_BUCKET = 'videos'
@@ -395,6 +398,15 @@ export async function POST(request: Request) {
     const videoFileId =
       typeof body.videoFileId === 'string' ? body.videoFileId.trim() : ''
 
+    const trimRangeResult = validateTrimRange(body.startSeconds, body.endSeconds)
+    // If one of startSeconds/endSeconds is provided but the range is invalid, reject early
+    const hasTrimInput = body.startSeconds !== undefined || body.endSeconds !== undefined
+    const trimRange = 'error' in trimRangeResult ? null : trimRangeResult
+    if (hasTrimInput && trimRange === null) {
+      const msg = (trimRangeResult as { error: string }).error
+      if (msg !== 'no range') return createErrorResponse(400, msg)
+    }
+
     if (sourceType === 'video') {
       if (!instructorId || !videoFileId) {
         return createErrorResponse(
@@ -496,7 +508,18 @@ export async function POST(request: Request) {
         return createErrorResponse(500, 'Failed to download video file.')
       }
 
-      const videoBuffer = Buffer.from(await videoData.arrayBuffer())
+      let videoBuffer: Buffer = Buffer.from(await videoData.arrayBuffer())
+
+      // Apply time-range splice before handing off to transcription and CV.
+      if (trimRange) {
+        try {
+          videoBuffer = await trimVideoBuffer(videoBuffer, extension, trimRange)
+        } catch (error) {
+          const message = error instanceof Error ? error.message : 'Video trim failed.'
+          console.error('Video trim failed:', error)
+          return createErrorResponse(500, `Video trim failed: ${message}`)
+        }
+      }
 
       let chatSessionId: string | null = null
 
