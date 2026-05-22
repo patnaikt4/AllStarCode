@@ -40,7 +40,7 @@ Be succinct: prefer tight bullets over long prose. State the insight and one con
 
 const VIDEO_FEEDBACK_SYSTEM_PROMPT = `You are an instructional coach reviewing a teaching session recorded by an AllStarCode instructor.
 
-You have access to both a transcript of what was said and, when available, computer vision metrics about the instructor's physical presence (face visibility, body visibility, and dominant facial expressions sampled from the video).
+You have access to a timestamped transcript of what was said, and when available: computer vision metrics about the instructor's physical presence, and a screen recording timeline describing what was visible on screen at each moment.
 
 Your job is to give concrete, constructive feedback that helps the instructor improve their delivery and content alignment.
 
@@ -49,7 +49,8 @@ Prioritize:
 - clarity of verbal explanations and instructions given to students
 - pacing, sequencing, and transitions throughout the session
 - student engagement and participation cues
-- physical presence and delivery energy when CV data is available (on-camera time, visible engagement)
+- physical presence and delivery energy when CV data is available
+- screen/speech alignment: flag moments where the instructor explains a concept verbally but does not show a corresponding example, demo, or visual on screen — and moments where the screen content is blank, idle, or unrelated to what is being taught
 - actionable changes the instructor can apply in the next session
 
 Keep the tone supportive, specific, and practical.
@@ -61,15 +62,17 @@ function buildFeedbackPrompt({
   lessonPlanText,
   source = 'written_lesson_plan',
   cvMetrics,
+  screenTimeline,
 }: {
   curriculumContext: string
   lessonPlanText: string
   source?: FeedbackSource
   cvMetrics?: string
+  screenTimeline?: string
 }) {
   const isVideo = source === 'video_transcript'
   const contentLabel = isVideo ? 'video transcript' : 'lesson plan'
-  const contentHeader = isVideo ? 'Video transcript' : 'Lesson plan text'
+  const contentHeader = isVideo ? 'Timestamped video transcript' : 'Lesson plan text'
 
   const hasCurriculumContext = curriculumContext && curriculumContext !== '[Placeholder: curriculum context]'
 
@@ -77,9 +80,21 @@ function buildFeedbackPrompt({
     ? `Curriculum context:\n${curriculumContext}\n\n`
     : ''
 
-  const cvSection = isVideo && cvMetrics
-    ? `${cvMetrics}\n\n`
+  const cvSection = isVideo && cvMetrics ? `${cvMetrics}\n\n` : ''
+
+  const screenSection = isVideo && screenTimeline
+    ? `${screenTimeline}\n\nWhen giving feedback, cross-reference the screen timeline above with the transcript timestamps. Flag specific moments where the instructor explains a concept verbally but is not demonstrating it on screen, and moments where the screen is blank or idle while teaching is occurring.\n\n`
     : ''
+
+  const screenInstruction =
+    isVideo && screenTimeline
+      ? `\n${cvMetrics ? (hasCurriculumContext ? '7' : '6') : hasCurriculumContext ? '6' : '5'}. Screen/speech alignment: identify moments where what is being said does not match what is shown on screen (e.g. explaining variables but showing a blank editor)`
+      : ''
+
+  const cvInstruction =
+    isVideo && cvMetrics
+      ? `\n${hasCurriculumContext ? '6' : '5'}. Physical presence and on-camera engagement based on the CV data above`
+      : ''
 
   const curriculumInstruction = hasCurriculumContext
     ? `Your feedback must be grounded in the AllStarCode curriculum context provided below. Focus on:
@@ -87,12 +102,12 @@ function buildFeedbackPrompt({
 2. Where the ${contentLabel}'s approach, vocabulary, or activities diverge from AllStarCode's curriculum
 3. Specific changes to better align with AllStarCode's content and teaching expectations
 4. Clarity of ${isVideo ? 'spoken explanations, pacing, and student engagement' : 'directions, pacing, and student engagement'} relative to AllStarCode's style
-5. Concrete next steps to bring the ${isVideo ? 'session' : 'lesson'} into closer alignment${isVideo && cvMetrics ? '\n6. Physical presence and on-camera engagement based on the CV data above' : ''}`
+5. Concrete next steps to bring the ${isVideo ? 'session' : 'lesson'} into closer alignment${cvInstruction}${screenInstruction}`
     : `No curriculum context is available. Give general instructional coaching feedback on this ${contentLabel}. Focus on:
 1. Clarity of learning objectives and student outcomes
 2. ${isVideo ? 'Pacing, verbal clarity, and student engagement cues' : 'Pacing, sequencing, and student engagement'}
 3. Instructional design quality and accessibility
-4. Concrete improvements the instructor can make next${isVideo && cvMetrics ? '\n5. Physical presence and on-camera engagement based on the CV data above' : ''}`
+4. Concrete improvements the instructor can make next${cvInstruction}${screenInstruction}`
 
   return `
 Review this ${contentLabel} and provide instructional coaching feedback.
@@ -106,17 +121,18 @@ Return:
 
 Style: succinct throughout. Get to recommendations quickly.
 
-${cvSection}${curriculumSection}${contentHeader}:
+${cvSection}${screenSection}${curriculumSection}${contentHeader}:
 ${lessonPlanText}
 `.trim()
 }
 
 export async function getFeedbackFromRag(
   extractedLessonPlanText: string,
-  options?: { source?: FeedbackSource; cvMetrics?: string }
+  options?: { source?: FeedbackSource; cvMetrics?: string; screenTimeline?: string }
 ): Promise<string> {
   const source = options?.source ?? 'written_lesson_plan'
   const cvMetrics = options?.cvMetrics
+  const screenTimeline = options?.screenTimeline
   const lessonPlanText = stripInvalidUtf16Scalars(extractedLessonPlanText).trim()
 
   if (!lessonPlanText) {
@@ -139,6 +155,7 @@ export async function getFeedbackFromRag(
       lessonPlanText,
       source,
       cvMetrics,
+      screenTimeline,
     }),
     max_output_tokens: getMaxOutputTokens(),
   })

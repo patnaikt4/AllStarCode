@@ -115,6 +115,8 @@ export default function InstructorDashboardClient({
   const [isUploadingPdf, setIsUploadingPdf] = useState(false)
   const [isUploadingVideo, setIsUploadingVideo] = useState(false)
   const [generatingLessonPlanId, setGeneratingLessonPlanId] = useState<string | null>(null)
+  const [videoTypeSelectingId, setVideoTypeSelectingId] = useState<string | null>(null)
+  const [deletingFileId, setDeletingFileId] = useState<string | null>(null)
   const [videoTrimInputs, setVideoTrimInputs] = useState<
     Record<string, { startMin: string; startSec: string; endMin: string; endSec: string }>
   >({})
@@ -263,9 +265,13 @@ export default function InstructorDashboardClient({
     }
   }
 
-  async function handleGenerateFeedback(row: InstructorUploadRow) {
+  async function handleGenerateFeedback(
+    row: InstructorUploadRow,
+    videoType?: 'webcam' | 'screen' | 'combined'
+  ) {
     setGenerateError(null)
     setUploadError(null)
+    setVideoTypeSelectingId(null)
 
     try {
       setGeneratingLessonPlanId(row.fileId)
@@ -278,7 +284,6 @@ export default function InstructorDashboardClient({
       }
       const hasStart = (trim?.startMin ?? '') !== '' || (trim?.startSec ?? '') !== ''
       const hasEnd = (trim?.endMin ?? '') !== '' || (trim?.endSec ?? '') !== ''
-      // Default start to 0, default end to the full video duration if known
       const startSeconds = hasStart ? toSeconds(trim?.startMin, trim?.startSec) : 0
       const endSeconds = hasEnd
         ? toSeconds(trim?.endMin, trim?.endSec)
@@ -291,6 +296,7 @@ export default function InstructorDashboardClient({
               lessonPlanId: row.fileId,
               source_type: 'video',
               videoFileId: row.fileId,
+              videoType: videoType ?? 'combined',
               ...(startSeconds !== undefined ? { startSeconds } : {}),
               ...(endSeconds !== undefined ? { endSeconds } : {}),
             }
@@ -342,6 +348,24 @@ export default function InstructorDashboardClient({
     }
   }
 
+  async function handleDeleteFile(fileId: string) {
+    if (!window.confirm('Delete this file? This cannot be undone.')) return
+
+    setDeletingFileId(fileId)
+    try {
+      const res = await fetch(`/api/files/${fileId}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const data = (await res.json()) as { error?: string }
+        throw new Error(data.error ?? 'Delete failed.')
+      }
+      setRows((current) => current.filter((r) => r.fileId !== fileId))
+    } catch (error) {
+      setUploadError(getErrorMessage(error, 'Could not delete the file. Please try again.'))
+    } finally {
+      setDeletingFileId(null)
+    }
+  }
+
   useEffect(() => {
     const hasActiveVideoJob = rows.some(
       (row) =>
@@ -378,7 +402,7 @@ export default function InstructorDashboardClient({
               return row
             }
 
-            const match = items.find((item) => item.id === row.feedbackId)
+            const match = items.find((item) => item.id === String(row.feedbackId))
             if (!match) {
               return row
             }
@@ -581,18 +605,49 @@ export default function InstructorDashboardClient({
                         </div>
                       )}
                       <div className="dashboard-row-actions">
-                        <button
-                          type="button"
-                          className="dashboard-secondary-button"
-                          onClick={() => handleGenerateFeedback(row)}
-                          disabled={isGenerating || isVideoInProgress || hasActiveVideoJob}
-                        >
-                          {isGenerating || isVideoInProgress || hasActiveVideoJob
-                            ? 'Processing...'
-                            : isReady
-                              ? 'Regenerate feedback'
-                              : 'Generate feedback'}
-                        </button>
+                        {row.sourceType === 'video' && videoTypeSelectingId === row.fileId ? (
+                          <div className="video-type-picker">
+                            <span className="video-type-label">What type of recording is this?</span>
+                            <div className="video-type-options">
+                              {(['webcam', 'screen', 'combined'] as const).map((type) => (
+                                <button
+                                  key={type}
+                                  type="button"
+                                  className="video-type-option"
+                                  onClick={() => handleGenerateFeedback(row, type)}
+                                >
+                                  {type === 'webcam' && '📷 Webcam'}
+                                  {type === 'screen' && '🖥️ Screen recording'}
+                                  {type === 'combined' && '🎬 Both / unsure'}
+                                </button>
+                              ))}
+                              <button
+                                type="button"
+                                className="video-type-cancel"
+                                onClick={() => setVideoTypeSelectingId(null)}
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="dashboard-secondary-button"
+                            onClick={() =>
+                              row.sourceType === 'video'
+                                ? setVideoTypeSelectingId(row.fileId)
+                                : handleGenerateFeedback(row)
+                            }
+                            disabled={isGenerating || isVideoInProgress || hasActiveVideoJob}
+                          >
+                            {isGenerating || isVideoInProgress || hasActiveVideoJob
+                              ? 'Processing...'
+                              : isReady
+                                ? 'Regenerate feedback'
+                                : 'Generate feedback'}
+                          </button>
+                        )}
 
                         {isReady ? (
                           <Link
@@ -606,12 +661,24 @@ export default function InstructorDashboardClient({
                           <span className="dashboard-link-button disabled">View feedback</span>
                         )}
 
-                        <Link
-                          className="dashboard-secondary-button"
-                          href={`/dashboard/instructor/chat?fileId=${row.fileId}&fileName=${encodeURIComponent(row.fileName)}`}
+                        {row.sourceType === 'pdf' && (
+                          <Link
+                            className="dashboard-secondary-button"
+                            href={`/dashboard/instructor/chat?fileId=${row.fileId}&fileName=${encodeURIComponent(row.fileName)}`}
+                          >
+                            Chat about this
+                          </Link>
+                        )}
+
+                        <button
+                          type="button"
+                          className="dashboard-delete-button"
+                          onClick={() => void handleDeleteFile(row.fileId)}
+                          disabled={deletingFileId === row.fileId || isGenerating}
+                          title="Delete file"
                         >
-                          Chat about this
-                        </Link>
+                          {deletingFileId === row.fileId ? 'Deleting…' : 'Delete'}
+                        </button>
                       </div>
 
                       {row.feedbackStatus === 'failed' && row.errorMessage ? (

@@ -208,7 +208,9 @@ export default function InstructorChatWorkspace({ userEmail, fileId, fileName }:
     <div className="instructor-shell">
       <aside className="instructor-sidebar">
         <div className="sidebar-header">
-          <p className="sidebar-brand">AllStarCode</p>
+          <a href="/dashboard/instructor" className="sidebar-brand-link">
+            ALLSTARCODE
+          </a>
           <button type="button" className="sidebar-new-btn" onClick={handleNewChat}>
             <span>+</span> New Chat
           </button>
@@ -251,12 +253,10 @@ export default function InstructorChatWorkspace({ userEmail, fileId, fileName }:
 
         <div className="sidebar-footer">
           <div className="sidebar-user-info">
-            <span className="badge instructor">Instructor</span>
-            <span className="sidebar-user-email">{userEmail}</span>
+            <span className="sidebar-signed-in-label">Signed in as</span>
+            <span className="sidebar-user-email-prominent">{userEmail}</span>
+            <span className="badge instructor" style={{ marginBottom: 0 }}>Instructor</span>
           </div>
-          <a href="/dashboard/instructor" className="logout-btn" style={{ textDecoration: 'none' }}>
-            Dashboard
-          </a>
         </div>
       </aside>
 

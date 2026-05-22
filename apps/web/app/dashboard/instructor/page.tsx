@@ -154,8 +154,7 @@ export default async function InstructorDashboardPage() {
             <p className="dashboard-eyebrow">Instructor Dashboard</p>
             <h1>Uploads and feedback</h1>
             <p className="dashboard-hero-copy">
-              This dashboard lives at <strong>/dashboard/instructor</strong>. New uploads appear
-              after a successful upload and feedback becomes viewable as soon as generation
+              New uploads appear after a successful upload and feedback becomes viewable as soon as generation
               finishes.
             </p>
           </div>
