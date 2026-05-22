@@ -695,6 +695,9 @@ button[type='submit']:hover {
 .dashboard-upload-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 
 .dashboard-file-input {
@@ -868,6 +871,11 @@ button[type='submit']:hover {
 
   .dashboard-stat-card {
     min-width: 0;
+    width: 100%;
+  }
+
+  .dashboard-upload-actions {
+    justify-content: flex-start;
     width: 100%;
   }
 }
