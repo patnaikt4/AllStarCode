@@ -1117,6 +1117,48 @@ a.sidebar-brand:hover {
 }
 
 /* Error banner above the composer */
+.chat-welcome {
+  max-width: 520px;
+  margin: auto;
+  padding: 40px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+}
+
+.chat-welcome-icon {
+  font-size: 2rem;
+  color: #0070f3;
+  line-height: 1;
+}
+
+.chat-welcome-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0;
+}
+
+.chat-welcome-body {
+  font-size: 0.92rem;
+  color: #374151;
+  line-height: 1.65;
+  margin: 0;
+}
+
+.chat-welcome-note {
+  font-size: 0.8rem;
+  color: #6b7280;
+  line-height: 1.55;
+  margin: 0;
+  padding: 8px 12px;
+  background: #f9fafb;
+  border-radius: 8px;
+  border: 1px solid #e5e7eb;
+}
+
 .chat-error-banner {
   margin: 0 28px 10px;
   padding: 10px 14px;

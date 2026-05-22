@@ -24,11 +24,15 @@ function truncatePreview(content: string | null): string | null {
 }
 
 /**
- * GET /api/chat/sessions
- * Returns all chat sessions owned by the logged-in user.
+ * GET /api/chat/sessions[?fileId=uuid]
+ * Returns chat sessions owned by the logged-in user.
+ * When fileId is provided, returns only sessions linked to that lesson plan.
  */
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    const { searchParams } = new URL(request.url)
+    const fileId = searchParams.get('fileId')
+
     const supabase = await createClient()
     const session = await getSessionUser(supabase)
 
@@ -36,11 +40,17 @@ export async function GET() {
       return session.response
     }
 
-    const { data: sessions, error: sessionsError } = await supabase
+    let query = supabase
       .from('chat_sessions')
       .select('id, title, created_at, updated_at')
       .eq('user_id', session.user.id)
       .order('updated_at', { ascending: false })
+
+    if (fileId) {
+      query = query.eq('file_id', fileId)
+    }
+
+    const { data: sessions, error: sessionsError } = await query
 
     if (sessionsError) {
       console.error('GET /api/chat/sessions:', sessionsError)

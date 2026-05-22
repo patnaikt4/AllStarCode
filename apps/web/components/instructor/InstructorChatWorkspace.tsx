@@ -26,9 +26,11 @@ function formatTime(dateStr: string | null) {
 
 type Props = {
   userEmail: string | undefined
+  fileId?: string
+  fileName?: string
 }
 
-export default function InstructorChatWorkspace({ userEmail }: Props) {
+export default function InstructorChatWorkspace({ userEmail, fileId, fileName }: Props) {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [isDraft, setIsDraft] = useState(false)
@@ -53,13 +55,16 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
 
   const loadSessions = useCallback(async () => {
     try {
-      const res = await fetch('/api/chat/sessions')
+      const url = fileId
+        ? `/api/chat/sessions?fileId=${encodeURIComponent(fileId)}`
+        : '/api/chat/sessions'
+      const res = await fetch(url)
       const data = (await res.json()) as {
-        success: boolean
+        success?: boolean
         sessions?: ChatSession[]
         error?: string
       }
-      if (data.success && data.sessions) {
+      if (data.sessions) {
         setSessions(data.sessions)
       }
     } catch {
@@ -67,7 +72,7 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
     } finally {
       setSessionsLoading(false)
     }
-  }, [])
+  }, [fileId])
 
   useEffect(() => {
     void loadSessions()
@@ -91,12 +96,12 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
         }
 
         const data = (await res.json()) as {
-          success: boolean
+          success?: boolean
           messages?: ChatMessage[]
           error?: string
         }
 
-        if (data.success && data.messages) {
+        if (data.messages) {
           setMessages(data.messages)
         } else {
           setError(data.error ?? 'Failed to load messages.')
@@ -146,7 +151,11 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
       const res = await fetch('/api/chat/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, message: text }),
+        body: JSON.stringify({
+          sessionId,
+          message: text,
+          ...(fileId ? { fileId } : {}),
+        }),
       })
 
       const data = (await res.json()) as {
@@ -170,9 +179,8 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
 
       if (isDraft) {
         setIsDraft(false)
+        void loadSessions()
       }
-
-      void loadSessions()
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Something went wrong.'
       setError(msg)
@@ -181,11 +189,20 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
       setGenerating(false)
       setTimeout(() => inputRef.current?.focus(), 50)
     }
-  }, [input, generating, activeSessionId, isDraft, loadSessions])
+  }, [input, generating, activeSessionId, isDraft, fileId, loadSessions])
 
+  const isLessonPlanMode = Boolean(fileId)
   const currentTitle = isDraft
-    ? 'New Chat'
+    ? isLessonPlanMode
+      ? `New chat — ${fileName ?? 'lesson plan'}`
+      : 'New Chat'
     : sessions.find((s) => s.id === activeSessionId)?.title ?? 'Chat'
+
+  const placeholder = isLessonPlanMode
+    ? `Ask about "${fileName ?? 'this lesson plan'}"…`
+    : activeSessionId
+      ? 'Type a message…'
+      : 'Start a new chat first…'
 
   return (
     <div className="instructor-shell">
@@ -198,7 +215,9 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
         </div>
 
         <nav className="sidebar-nav">
-          <p className="sidebar-nav-label">History</p>
+          <p className="sidebar-nav-label">
+            {isLessonPlanMode ? `Chats for this plan` : 'History'}
+          </p>
 
           {sessionsLoading ? (
             <>
@@ -243,16 +262,32 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
 
       <div className="instructor-main">
         <div className="instructor-topbar">
-          <p className="instructor-topbar-title">{currentTitle}</p>
+          <div>
+            <p className="instructor-topbar-title">{currentTitle}</p>
+            {isLessonPlanMode && fileName && (
+              <p className="instructor-topbar-meta">📄 {fileName}</p>
+            )}
+          </div>
           <span className="instructor-topbar-meta">
-            {!activeSessionId ? 'No session selected' : isDraft ? 'New conversation' : `${messages.length} message${messages.length === 1 ? '' : 's'}`}
+            {!activeSessionId
+              ? 'No session selected'
+              : isDraft
+                ? 'New conversation'
+                : `${messages.length} message${messages.length === 1 ? '' : 's'}`}
           </span>
         </div>
 
         <div className="instructor-thread" ref={threadRef}>
           {!activeSessionId ? (
             <div className="chat-empty-state">
-              <p>Click <strong>+ New Chat</strong> or select a past conversation from the sidebar.</p>
+              {isLessonPlanMode ? (
+                <p>
+                  Click <strong>+ New Chat</strong> to start a conversation about{' '}
+                  <strong>{fileName ?? 'this lesson plan'}</strong>, or select a past session from the sidebar.
+                </p>
+              ) : (
+                <p>Click <strong>+ New Chat</strong> or select a past conversation from the sidebar.</p>
+              )}
             </div>
           ) : messagesLoading ? (
             <>
@@ -261,8 +296,39 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
               <div className="chat-msg-skeleton assistant" />
             </>
           ) : messages.length === 0 ? (
-            <div className="chat-empty-state">
-              <p>Ask a question about the AllStarCode curriculum.</p>
+            <div className="chat-welcome">
+              <div className="chat-welcome-icon">✦</div>
+              {isLessonPlanMode ? (
+                <>
+                  <h2 className="chat-welcome-title">Lesson Plan Assistant</h2>
+                  <p className="chat-welcome-body">
+                    You&apos;re chatting about <strong>{fileName ?? 'this lesson plan'}</strong>.
+                    Ask me to review the plan, suggest improvements, align it with AllStarCode
+                    curriculum, or explain any concept in it.
+                  </p>
+                  <p className="chat-welcome-note">
+                    I&apos;m focused on computer science education and AllStarCode pedagogy —
+                    I&apos;ll gently redirect anything outside that scope.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h2 className="chat-welcome-title">AllStarCode Curriculum Assistant</h2>
+                  <p className="chat-welcome-body">
+                    Ask me anything about the AllStarCode curriculum, coding concepts, lesson
+                    structure, or teaching pedagogy. I use AllStarCode&apos;s curriculum as my
+                    source of truth.
+                  </p>
+                  <p className="chat-welcome-note">
+                    To get lesson-plan-specific feedback, go to your dashboard and click
+                    &ldquo;Chat about this&rdquo; on an uploaded file.
+                  </p>
+                  <p className="chat-welcome-note">
+                    I&apos;m focused on CS education — I&apos;ll redirect off-topic questions back
+                    to relevant content.
+                  </p>
+                </>
+              )}
             </div>
           ) : (
             messages.map((m) => (
@@ -303,7 +369,7 @@ export default function InstructorChatWorkspace({ userEmail }: Props) {
               ref={inputRef}
               className="chat-input"
               type="text"
-              placeholder={activeSessionId ? 'Type a message…' : 'Start a new chat first…'}
+              placeholder={placeholder}
               value={input}
               disabled={generating || !activeSessionId}
               aria-label="Chat message"
