@@ -1,0 +1,22 @@
+.git
+.next
+node_modules
+apps/web/node_modules
+
+# Env files — pass these as container environment variables instead
+.env
+.env.*
+apps/web/.env
+apps/web/.env.*
+
+# Example videos in CvResearch — large and not needed in the image
+CvResearch/example_video*
+
+# Python cache
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Docs and test artifacts
+docs/
+*.pdf
